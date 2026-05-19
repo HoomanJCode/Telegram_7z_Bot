@@ -86,8 +86,6 @@ def create_config():
     cfg["token"] = token
     if api_base:
         cfg["api_base_url"] = api_base
-        # For Bale: api_base_url should be like https://tapi.bale.ai/bot
-        # File URL should be like https://tapi.bale.ai/file
         if "/bot" in api_base:
             cfg["api_base_file_url"] = api_base.replace("/bot", "/file")
         else:
@@ -210,13 +208,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "**Features:**\n"
             "• Send a link → Download and pack to 7z\n"
             "• Send multiple links → Batch download to single 7z\n"
-            "• Send a file → Host it and get direct link\n\n"
+            "• Send a file → Choose to send as 7z or get direct link\n\n"
             "**Commands:**\n"
             "/setpassword `<pass>` - Set your 7z password\n"
             "/mypassword - Show current password status\n"
             "/status - Show bot status\n"
             f"Download method: **{download_method}**\n\n"
-            "Just send me a link to get started!",
+            "Just send me a link or file to get started!",
             parse_mode='Markdown'
         )
         logger.info(f"User {update.effective_user.id} started bot")
@@ -367,30 +365,22 @@ async def whitelist_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_telegram_file(file, dest_path: str) -> bool:
     """Download a file from Telegram/Bale using direct HTTP request."""
     try:
-        # Get file path from Telegram
         file_path = file.file_path
-        
-        # Construct the download URL
-        # For Bale, we need to use the correct file URL format
         bot = file.get_bot()
         
-        # Use the bot's built-in download method but with error handling
         await file.download_to_drive(dest_path)
         return True
         
     except Exception as e:
         logger.error(f"Error downloading Telegram file: {e}")
         
-        # Fallback: try direct HTTP download
         try:
             bot = file.get_bot()
             file_path = file.file_path
             
-            # Get the base URL from bot configuration
             base_url = bot.base_file_url if hasattr(bot, 'base_file_url') else "https://api.telegram.org/file"
             token = bot.token
             
-            # Construct URL properly
             download_url = f"{base_url}/bot{token}/{file_path}"
             logger.info(f"Trying fallback download URL: {download_url}")
             
@@ -413,76 +403,47 @@ async def download_telegram_file(file, dest_path: str) -> bool:
 # ----------------------------------------------------------------------
 @restricted
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle file upload from user - convert to 7z and host."""
+    """Handle file upload from user - show options."""
     try:
-        config = get_config(context)
-        host_base = config.get("host_base_url", "")
-        
-        if not host_base:
-            await update.message.reply_text(
-                "❌ Direct link feature not configured.\n"
-                "Admin needs to set it using /sethosturl command."
-            )
-            return
-
         document = update.message.document
-        file = await context.bot.get_file(document.file_id)
+        file_id = document.file_id
         
-        # Download to temp
-        temp_dir = tempfile.mkdtemp()
-        original_name = document.file_name or f"file_{uuid4().hex[:8]}"
-        dl_path = os.path.join(temp_dir, original_name)
+        # Store file info in user_data
+        context.user_data["pending_file"] = {
+            "file_id": file_id,
+            "file_name": document.file_name or f"file_{uuid4().hex[:8]}",
+            "file_size": document.file_size
+        }
         
-        status_msg = await update.message.reply_text("📥 Downloading file...")
+        keyboard = []
+        config = get_config(context)
+        host_available = bool(config.get("host_base_url"))
         
-        # Try to download with better error handling
-        success = await download_telegram_file(file, dl_path)
+        keyboard.append([
+            InlineKeyboardButton("📦 Send as 7z via Telegram", callback_data="file:telegram")
+        ])
         
-        if not success:
-            await status_msg.edit_text("❌ Failed to download file from server.")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return
+        if host_available:
+            keyboard.append([
+                InlineKeyboardButton("🔗 Get Direct Link", callback_data="file:host")
+            ])
         
-        # Create 7z archive
-        await status_msg.edit_text("📦 Creating 7z archive...")
-        user_id = str(update.effective_user.id)
-        passwords = get_passwords(context)
-        password = passwords.get(user_id, "")
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="file:cancel")])
         
-        archive_name = f"{uuid4().hex}.7z"
-        archive_path = os.path.join(temp_dir, archive_name)
+        file_size_mb = document.file_size / (1024 * 1024) if document.file_size else 0
         
-        await create_7z_archive([dl_path], archive_path, password)
-        
-        # Host the 7z file
-        dest = os.path.join(HOSTED_FILES_DIR, archive_name)
-        shutil.move(archive_path, dest)
-        
-        # Add metadata
-        meta = get_hosted_meta(context)
-        meta.append({
-            "filename": archive_name,
-            "created_at": time.time(),
-            "file_size": os.path.getsize(dest)
-        })
-        save_hosted_meta(meta)
-        
-        link = f"{host_base}/files/{archive_name}"
-        password_info = "\n🔒 Password protected" if password else ""
-        
-        await status_msg.edit_text(
-            f"✅ File hosted successfully!\n\n"
-            f"📎 Direct link:\n`{link}`{password_info}\n\n"
-            f"⏰ Expires in {config.get('store_time_days', 2)} days",
+        await update.message.reply_text(
+            f"📁 **File Received**\n\n"
+            f"Name: `{document.file_name}`\n"
+            f"Size: `{file_size_mb:.2f} MB`\n\n"
+            "Choose action:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
-        logger.info(f"File hosted: {archive_name}")
-        
-        shutil.rmtree(temp_dir, ignore_errors=True)
         
     except Exception as e:
         logger.error(f"Error handling file upload: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Failed to process file upload: {str(e)[:200]}")
+        await update.message.reply_text(f"❌ Failed to process file: {str(e)[:200]}")
 
 @restricted
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -548,9 +509,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data == "cancel":
             context.user_data.pop("pending_urls", None)
+            context.user_data.pop("pending_file", None)
             await query.edit_message_text("❌ Operation cancelled.")
             return
 
+        # Handle file actions
+        if data.startswith("file:"):
+            await handle_file_callback(update, context, query, data)
+            return
+
+        # Handle URL actions
         pending_urls = context.user_data.get("pending_urls")
         if not pending_urls:
             await query.edit_message_text("⏰ Session expired. Please send the links again.")
@@ -573,6 +541,160 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error handling callback: {e}", exc_info=True)
         await query.edit_message_text("❌ Failed to process callback.")
+
+async def handle_file_callback(update: Update, context, query, data):
+    """Handle file upload callbacks."""
+    _, action = data.split(":", 1)
+    
+    if action == "cancel":
+        context.user_data.pop("pending_file", None)
+        await query.edit_message_text("❌ File operation cancelled.")
+        return
+    
+    pending_file = context.user_data.get("pending_file")
+    if not pending_file:
+        await query.edit_message_text("⏰ Session expired. Please send the file again.")
+        return
+    
+    context.user_data.pop("pending_file", None)
+    
+    await query.edit_message_text("⏳ Processing file...\nThis may take a while.")
+    
+    asyncio.create_task(
+        process_file(update, context, pending_file, action, query)
+    )
+
+async def process_file(update: Update, context, file_info, action, query):
+    """Process uploaded file based on action."""
+    user_id = update.effective_user.id
+    config = get_config(context)
+    passwords = get_passwords(context)
+    password = passwords.get(str(user_id), "")
+    temp_dir = tempfile.mkdtemp(prefix="file_")
+    
+    try:
+        # Download the file
+        await query.edit_message_text("📥 Downloading file...")
+        file = await context.bot.get_file(file_info["file_id"])
+        dl_path = os.path.join(temp_dir, file_info["file_name"])
+        
+        success = await download_telegram_file(file, dl_path)
+        if not success:
+            await query.edit_message_text("❌ Failed to download file from server.")
+            return
+        
+        if action == "telegram":
+            # Create 7z and send via Telegram
+            await query.edit_message_text("📦 Creating 7z archive...")
+            archive_name = f"{uuid4().hex}.7z"
+            archive_path = os.path.join(temp_dir, archive_name)
+            await create_7z_archive([dl_path], archive_path, password)
+            
+            max_vol = max(1, config.get("max_telegram_size_mb", 50) - 1)
+            
+            if os.path.getsize(archive_path) > max_vol * 1024 * 1024:
+                await query.edit_message_text("📦 Splitting archive for Telegram...")
+                volumes = await create_split_7z(
+                    [archive_path],
+                    os.path.join(temp_dir, "split.7z"),
+                    password,
+                    max_vol
+                )
+                
+                total = len(volumes)
+                for i, vol in enumerate(volumes, 1):
+                    try:
+                        caption = f"📦 Part {i}/{total}"
+                        if password:
+                            caption += "\n🔒 Password protected"
+                        
+                        with open(vol, "rb") as fh:
+                            await context.bot.send_document(
+                                chat_id=query.message.chat_id,
+                                document=fh,
+                                filename=vol.name,
+                                caption=caption
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to send {vol.name}: {e}")
+                        await context.bot.send_message(
+                            chat_id=query.message.chat_id,
+                            text=f"❌ Failed to send part {i}: {vol.name}"
+                        )
+                
+                await query.edit_message_text(
+                    f"✅ 7z archive sent in {total} part(s)" +
+                    ("\n🔒 Password protected" if password else "")
+                )
+            else:
+                with open(archive_path, "rb") as fh:
+                    caption = "📦 7z Archive"
+                    if password:
+                        caption += "\n🔒 Password protected"
+                    
+                    await context.bot.send_document(
+                        chat_id=query.message.chat_id,
+                        document=fh,
+                        filename=archive_name,
+                        caption=caption
+                    )
+                
+                await query.edit_message_text(
+                    "✅ 7z archive sent successfully" +
+                    ("\n🔒 Password protected" if password else "")
+                )
+        
+        elif action == "host":
+            # Create 7z and host
+            host_base = config.get("host_base_url")
+            if not host_base:
+                await query.edit_message_text("❌ Direct link feature not configured.")
+                return
+            
+            await query.edit_message_text("📦 Creating 7z archive...")
+            archive_name = f"{uuid4().hex}.7z"
+            archive_path = os.path.join(temp_dir, archive_name)
+            await create_7z_archive([dl_path], archive_path, password)
+            
+            dest = os.path.join(HOSTED_FILES_DIR, archive_name)
+            shutil.move(archive_path, dest)
+            
+            meta = get_hosted_meta(context)
+            meta.append({
+                "filename": archive_name,
+                "created_at": time.time(),
+                "file_size": os.path.getsize(dest)
+            })
+            save_hosted_meta(meta)
+            
+            link = f"{host_base}/files/{archive_name}"
+            
+            # Create clickable button for the link
+            keyboard = [[InlineKeyboardButton("🔗 Open Link", url=link)]]
+            
+            message = f"✅ File archived and hosted!\n\n📎 **Direct Link:** [Click Here]({link})"
+            if password:
+                message += "\n🔒 Password protected"
+            message += f"\n⏰ Expires in {config.get('store_time_days', 2)} days"
+            
+            await query.edit_message_text(
+                message,
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                disable_web_page_preview=False
+            )
+            
+    except Exception as e:
+        logger.error(f"File processing error: {e}", exc_info=True)
+        try:
+            await query.edit_message_text(f"❌ Processing error: {str(e)[:200]}")
+        except:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"❌ Processing error: {str(e)[:200]}"
+            )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 # ----------------------------------------------------------------------
 # Download Functions
@@ -721,7 +843,7 @@ async def create_split_7z(files: List[str], output_base: str, password: str, max
     return volumes
 
 # ----------------------------------------------------------------------
-# Main Processing
+# Main Processing for Links
 # ----------------------------------------------------------------------
 async def process_links(update: Update, context, urls, action_type, action, query):
     """Process downloaded links based on action."""
@@ -822,15 +944,20 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             
             link = f"{host_base}/files/{archive_name}"
             
-            message = (
-                f"✅ **{len(files)}** file(s) archived and hosted!\n\n"
-                f"📎 Direct link:\n`{link}`\n\n"
-            )
-            if password:
-                message += "🔒 Password protected\n"
-            message += f"⏰ Expires in {config.get('store_time_days', 2)} days"
+            # Create clickable button for the link
+            keyboard = [[InlineKeyboardButton("🔗 Open Link", url=link)]]
             
-            await query.edit_message_text(message, parse_mode='Markdown')
+            message = f"✅ **{len(files)}** file(s) archived and hosted!\n\n📎 **Direct Link:** [Click Here]({link})"
+            if password:
+                message += "\n🔒 Password protected"
+            message += f"\n⏰ Expires in {config.get('store_time_days', 2)} days"
+            
+            await query.edit_message_text(
+                message,
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                disable_web_page_preview=False
+            )
             
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
