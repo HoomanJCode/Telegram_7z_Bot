@@ -427,7 +427,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
     except Exception as e:
         logger.error(f"Error handling file upload: {e}", exc_info=True)
-        await update.message.reply_text("❌ Failed to process file upload.")
+        await update.message.reply_text(f"❌ Failed to process file upload: {str(e)[:200]}")
 
 @restricted
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -524,7 +524,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------------------------------------------------
 async def download_with_aria2(urls: List[str], dest_dir: str) -> List[str]:
     """Download files using aria2c."""
-    downloaded_files = []
+    downloaded_files = set()
     
     for idx, url in enumerate(urls):
         try:
@@ -553,12 +553,13 @@ async def download_with_aria2(urls: List[str], dest_dir: str) -> List[str]:
             stdout, stderr = await process.communicate()
             
             if process.returncode == 0:
+                # Find new files in dest_dir
                 for file in os.listdir(dest_dir):
                     if file.endswith('.aria2'):
                         continue
                     file_path = os.path.join(dest_dir, file)
-                    if os.path.isfile(file_path) and file_path not in downloaded_files:
-                        downloaded_files.append(file_path)
+                    if os.path.isfile(file_path):
+                        downloaded_files.add(file_path)
                         logger.info(f"Downloaded: {file}")
             else:
                 logger.error(f"aria2 failed for {url}: {stderr.decode()}")
@@ -566,30 +567,28 @@ async def download_with_aria2(urls: List[str], dest_dir: str) -> List[str]:
         except Exception as e:
             logger.error(f"aria2 download failed for {url}: {e}")
     
-    return downloaded_files
+    return list(downloaded_files)
 
 async def download_direct(urls: List[str], dest_dir: str) -> List[str]:
     """Download files using aiohttp directly."""
     downloaded = []
+    timeout = aiohttp.ClientTimeout(total=600)
     
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         for idx, url in enumerate(urls):
             try:
                 logger.info(f"Downloading: {url}")
                 
-                async with session.get(
-                    url, 
-                    timeout=aiohttp.ClientTimeout(total=600),
-                    headers={"User-Agent": "Mozilla/5.0"}
-                ) as resp:
+                headers = {"User-Agent": "Mozilla/5.0"}
+                async with session.get(url, headers=headers) as resp:
                     resp.raise_for_status()
                     
                     cd = resp.headers.get("Content-Disposition")
                     fname = None
                     if cd and "filename=" in cd:
-                        fname = re.findall(r'filename[^;=\n]*=((["\']).*?\2|[^;\n]*)', cd)
-                        if fname:
-                            fname = fname[0][0].strip('"\'')
+                        fname_match = re.findall(r'filename[^;=\n]*=((["\']).*?\2|[^;\n]*)', cd)
+                        if fname_match:
+                            fname = fname_match[0][0].strip('"\'')
                     
                     if not fname:
                         path = resp.url.path.rstrip("/")
@@ -598,9 +597,9 @@ async def download_direct(urls: List[str], dest_dir: str) -> List[str]:
                     fname = re.sub(r'[\\/*?:"<>|]', "_", fname)
                     filepath = os.path.join(dest_dir, fname)
                     
-                    async with aiofiles.open(filepath, "wb") as f:
+                    with open(filepath, "wb") as f:
                         async for chunk in resp.content.iter_chunked(8192):
-                            await f.write(chunk)
+                            f.write(chunk)
                     
                     downloaded.append(filepath)
                     logger.info(f"Downloaded: {fname}")
@@ -659,10 +658,10 @@ async def create_split_7z(files: List[str], output_base: str, password: str, max
         raise Exception(f"7z split failed: {stderr.decode().strip()}")
     
     # Find all volumes
+    output_dir = os.path.dirname(output_base)
+    base_name = os.path.basename(output_base)
     volumes = sorted(
-        [p for p in Path(os.path.dirname(output_base)).glob(
-            os.path.basename(output_base) + "*"
-        ) if not p.name.endswith('.tmp')],
+        [p for p in Path(output_dir).glob(base_name + "*") if not p.name.endswith('.tmp')],
         key=lambda p: p.name
     )
     
@@ -720,7 +719,7 @@ async def process_links(update: Update, context, urls, action_type, action, quer
                         if password:
                             caption += "\n🔒 Password protected"
                         
-                        async with aiofiles.open(vol, "rb") as fh:
+                        with open(vol, "rb") as fh:
                             await context.bot.send_document(
                                 chat_id=query.message.chat_id,
                                 document=fh,
@@ -740,7 +739,7 @@ async def process_links(update: Update, context, urls, action_type, action, quer
                 )
             else:
                 # Send single file
-                async with aiofiles.open(archive_path, "rb") as fh:
+                with open(archive_path, "rb") as fh:
                     caption = "📦 7z Archive"
                     if password:
                         caption += "\n🔒 Password protected"
