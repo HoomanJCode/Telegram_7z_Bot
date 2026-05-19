@@ -64,14 +64,11 @@ class PasswordEncryption:
     
     def _derive_key(self, user_id: str) -> bytes:
         """Derive encryption key from user ID and secret key."""
-        # Combine user ID and secret key
         combined = f"{user_id}:{self.secret_key}".encode()
-        
-        # Use PBKDF2 to derive a key
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=b"filebot_salt_2024",  # Fixed salt for reproducibility
+            salt=b"filebot_salt_2024",
             iterations=100000,
         )
         key = base64.urlsafe_b64encode(kdf.derive(combined))
@@ -81,7 +78,6 @@ class PasswordEncryption:
         """Encrypt password for a specific user."""
         if not password:
             return ""
-        
         key = self._derive_key(user_id)
         f = Fernet(key)
         encrypted = f.encrypt(password.encode())
@@ -91,7 +87,6 @@ class PasswordEncryption:
         """Decrypt password for a specific user."""
         if not encrypted_password:
             return ""
-        
         try:
             key = self._derive_key(user_id)
             f = Fernet(key)
@@ -119,7 +114,7 @@ DEFAULT_CONFIG = {
     "aria2_secret": "",
     "enable_cache": True,
     "cache_db_file": "cache_db.json",
-    "encryption_key": "",  # Will be generated on first run
+    "encryption_key": "",
 }
 
 CONFIG_FILE = "config.json"
@@ -127,8 +122,9 @@ PASSWORDS_FILE = "passwords.json"
 HOSTED_FILES_DIR = "hosted_files"
 HOSTED_META_FILE = os.path.join(HOSTED_FILES_DIR, "metadata.json")
 
-# Global encryption instance
+# Global instances
 password_encryption = None
+file_cache = None
 
 # ----------------------------------------------------------------------
 # Cache/Deduplication System
@@ -212,9 +208,6 @@ class FileCache:
                 sha256.update(chunk)
         return sha256.hexdigest()
 
-# Global cache instance
-file_cache = FileCache()
-
 # ----------------------------------------------------------------------
 # Helper Functions
 # ----------------------------------------------------------------------
@@ -238,8 +231,6 @@ def create_config():
     
     cfg = DEFAULT_CONFIG.copy()
     cfg["token"] = token
-    
-    # Generate random encryption key
     cfg["encryption_key"] = secrets.token_hex(32)
     
     if api_base:
@@ -271,7 +262,6 @@ def create_config():
     
     save_config(cfg)
     print(f"Config saved to {CONFIG_FILE}.")
-    print(f"Encryption key generated and saved in config.")
     return cfg
 
 def load_passwords() -> Dict[str, str]:
@@ -361,7 +351,7 @@ def format_storage_time(hours: int) -> str:
         return f"{days:.1f} day(s)"
 
 def create_link_message(link: str, has_password: bool = False, storage_hours: int = 48) -> tuple:
-    """Create a message with clickable link and copy-able text (no password shown)."""
+    """Create a message with clickable link and copy-able text."""
     message = (
         f"✅ File archived and hosted!\n\n"
         f"📎 **Direct Link:**\n"
@@ -412,7 +402,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler."""
     try:
         config = get_config(context)
-        download_method = config.get("download_method", "direct")
         storage_hours = config.get("store_time_hours", 48)
         
         await update.message.reply_text(
@@ -420,15 +409,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "**Features:**\n"
             "• Send a link → Download and pack to 7z\n"
             "• Send multiple links → Batch download to single 7z\n"
-            "• Send a file → Choose to send as 7z or get direct link\n"
-            "• File caching enabled (no duplicates)\n\n"
+            "• Send a file → Choose to send as 7z or get direct link\n\n"
             "**Commands:**\n"
             "/setpassword `<pass>` - Set your 7z password (encrypted)\n"
             "/mypassword - Check if password is set\n"
             "/removepassword - Remove your password\n"
             "/status - Show bot status\n"
-            "/clearcache - Clear file cache\n"
-            f"Download method: **{download_method}**\n"
             f"Storage time: **{format_storage_time(storage_hours)}**\n\n"
             "Just send me a link or file to get started!",
             parse_mode='Markdown'
@@ -450,11 +436,9 @@ async def set_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         args = context.args
         
-        # Delete the command message for privacy
         await update.message.delete()
         
         if not args:
-            # Send ephemeral message
             msg = await update.message.reply_text(
                 "Usage: `/setpassword <your_password>`\n"
                 "⚠️ This message will be deleted for privacy.",
@@ -507,20 +491,38 @@ async def remove_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error removing password: {e}", exc_info=True)
 
-@restricted
+@admin_only
 async def clear_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear file cache."""
+    """Clear file cache (admin only)."""
     try:
         global file_cache
+        cache_count = len(file_cache.cache["urls"]) + len(file_cache.cache["files"])
         file_cache = FileCache()
-        await update.message.reply_text("✅ File cache cleared successfully.")
-        logger.info(f"Cache cleared by user {update.effective_user.id}")
+        await update.message.reply_text(f"✅ File cache cleared. ({cache_count} entries removed)")
+        logger.info(f"Cache cleared by admin {update.effective_user.id} ({cache_count} entries)")
     except Exception as e:
         logger.error(f"Error clearing cache: {e}", exc_info=True)
 
 @restricted
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show bot status."""
+    """Show bot status (public info only)."""
+    try:
+        config = get_config(context)
+        hosted_meta = get_hosted_meta(context)
+        
+        status_text = (
+            f"📊 **Bot Status**\n\n"
+            f"Hosted files: `{len(hosted_meta)}`\n"
+            f"Storage time: `{format_storage_time(config.get('store_time_hours', 48))}`\n"
+            f"Max file size: `{config.get('max_telegram_size_mb', 50)}` MB\n"
+        )
+        await update.message.reply_text(status_text, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error showing status: {e}", exc_info=True)
+
+@admin_only
+async def admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show full bot status (admin only)."""
     try:
         config = get_config(context)
         hosted_meta = get_hosted_meta(context)
@@ -528,19 +530,22 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cache_count = len(file_cache.cache["urls"]) + len(file_cache.cache["files"])
         
         status_text = (
-            f"📊 **Bot Status**\n\n"
+            f"📊 **Admin Bot Status**\n\n"
             f"Download method: `{config.get('download_method', 'direct')}`\n"
+            f"API base: `{config.get('api_base_url', 'default')}`\n"
+            f"Host base: `{config.get('host_base_url', 'not set')}`\n"
             f"Hosted files: `{len(hosted_meta)}`\n"
             f"Cached entries: `{cache_count}`\n"
             f"Storage time: `{format_storage_time(config.get('store_time_hours', 48))}`\n"
             f"Max file size: `{config.get('max_telegram_size_mb', 50)}` MB\n"
             f"Whitelist enabled: `{'Yes' if config.get('whitelist') else 'No'}`\n"
+            f"Whitelist count: `{len(config.get('whitelist', []))}`\n"
             f"Caching enabled: `{'Yes' if config.get('enable_cache', True) else 'No'}`\n"
-            f"Password encryption: `Active`\n"
+            f"Encryption: `Active`\n"
         )
         await update.message.reply_text(status_text, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Error showing status: {e}", exc_info=True)
+        logger.error(f"Error showing admin status: {e}", exc_info=True)
 
 @admin_only
 async def set_host_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -627,22 +632,15 @@ async def whitelist_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_telegram_file(file, dest_path: str) -> bool:
     """Download a file from Telegram/Bale using direct HTTP request."""
     try:
-        file_path = file.file_path
-        bot = file.get_bot()
-        
         await file.download_to_drive(dest_path)
         return True
-        
     except Exception as e:
         logger.error(f"Error downloading Telegram file: {e}")
-        
         try:
             bot = file.get_bot()
             file_path = file.file_path
-            
             base_url = bot.base_file_url if hasattr(bot, 'base_file_url') else "https://api.telegram.org/file"
             token = bot.token
-            
             download_url = f"{base_url}/bot{token}/{file_path}"
             logger.info(f"Trying fallback download URL: {download_url}")
             
@@ -671,36 +669,19 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         file_id = document.file_id
         config = get_config(context)
         
-        # Check cache if enabled
         if config.get("enable_cache", True):
             cached = file_cache.get_cached_file(file_id)
             if cached:
                 logger.info(f"Cache hit for file_id: {file_id}")
                 host_base = config.get("host_base_url", "")
-                
                 if cached.get("hosted_file") and host_base:
                     link = f"{host_base}/files/{cached['hosted_file']}"
                     has_password = bool(cached.get("password", ""))
-                    message, keyboard = create_link_message(
-                        link, 
-                        has_password,
-                        config.get("store_time_hours", 48)
-                    )
+                    message, keyboard = create_link_message(link, has_password, config.get("store_time_hours", 48))
                     message = "🔄 **Cached File Found!**\n\n" + message
-                    await update.message.reply_text(
-                        message,
-                        parse_mode='Markdown',
-                        reply_markup=keyboard,
-                        disable_web_page_preview=False
-                    )
+                    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=keyboard, disable_web_page_preview=False)
                     return
-                else:
-                    await update.message.reply_text(
-                        "🔄 This file was already processed. Sending again...",
-                        parse_mode='Markdown'
-                    )
         
-        # Store file info in user_data
         context.user_data["pending_file"] = {
             "file_id": file_id,
             "file_name": document.file_name or f"file_{uuid4().hex[:8]}",
@@ -710,28 +691,18 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard = []
         host_available = bool(config.get("host_base_url"))
         
-        keyboard.append([
-            InlineKeyboardButton("📦 Send as 7z via Telegram", callback_data="file:telegram")
-        ])
-        
+        keyboard.append([InlineKeyboardButton("📦 Send as 7z via Telegram", callback_data="file:telegram")])
         if host_available:
-            keyboard.append([
-                InlineKeyboardButton("🔗 Get Direct Link", callback_data="file:host")
-            ])
-        
+            keyboard.append([InlineKeyboardButton("🔗 Get Direct Link", callback_data="file:host")])
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="file:cancel")])
         
         file_size_mb = document.file_size / (1024 * 1024) if document.file_size else 0
         
         await update.message.reply_text(
-            f"📁 **File Received**\n\n"
-            f"Name: `{document.file_name}`\n"
-            f"Size: `{file_size_mb:.2f} MB`\n\n"
-            "Choose action:",
+            f"📁 **File Received**\n\nName: `{document.file_name}`\nSize: `{file_size_mb:.2f} MB`\n\nChoose action:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
-        
     except Exception as e:
         logger.error(f"Error handling file upload: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Failed to process file: {str(e)[:200]}")
@@ -744,15 +715,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         urls = list(set(re.findall(r'https?://\S+', text)))
         
         if not urls:
-            await update.message.reply_text(
-                "❌ No valid link found.\n"
-                "Please send a message containing HTTP/HTTPS links."
-            )
+            await update.message.reply_text("❌ No valid link found.\nPlease send a message containing HTTP/HTTPS links.")
             return
 
         config = get_config(context)
         
-        # Check cache for URLs if enabled
         if config.get("enable_cache", True):
             cached_results = []
             for url in urls:
@@ -767,27 +734,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         if cached.get("hosted_file"):
                             link = f"{host_base}/files/{cached['hosted_file']}"
                             has_password = bool(cached.get("password", ""))
-                            message, keyboard = create_link_message(
-                                link,
-                                has_password,
-                                config.get("store_time_hours", 48)
-                            )
+                            message, keyboard = create_link_message(link, has_password, config.get("store_time_hours", 48))
                             message = f"🔄 **Cached result for:**\n`{url}`\n\n" + message
-                            await update.message.reply_text(
-                                message,
-                                parse_mode='Markdown',
-                                reply_markup=keyboard,
-                                disable_web_page_preview=False
-                            )
-                        else:
-                            await update.message.reply_text(
-                                f"🔄 Cached result found for: `{url}`\nSending again...",
-                                parse_mode='Markdown'
-                            )
+                            await update.message.reply_text(message, parse_mode='Markdown', reply_markup=keyboard, disable_web_page_preview=False)
                     
                     if len(cached_results) == len(urls):
                         return
-                    
                     urls = [url for url in urls if url not in [c[0] for c in cached_results]]
 
         context.user_data["pending_urls"] = urls
@@ -797,31 +749,21 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         host_available = bool(config.get("host_base_url"))
         
         if len(urls) > 1:
-            keyboard.append([
-                InlineKeyboardButton("📦 Send as 7z via Telegram", callback_data="batch:telegram")
-            ])
+            keyboard.append([InlineKeyboardButton("📦 Send as 7z via Telegram", callback_data="batch:telegram")])
             if host_available:
-                keyboard.append([
-                    InlineKeyboardButton("🔗 Host and Get Direct Links", callback_data="batch:host")
-                ])
+                keyboard.append([InlineKeyboardButton("🔗 Host and Get Direct Links", callback_data="batch:host")])
         else:
-            keyboard.append([
-                InlineKeyboardButton("📦 Send as 7z via Telegram", callback_data="single:telegram")
-            ])
+            keyboard.append([InlineKeyboardButton("📦 Send as 7z via Telegram", callback_data="single:telegram")])
             if host_available:
-                keyboard.append([
-                    InlineKeyboardButton("🔗 Host and Get Direct Link", callback_data="single:host")
-                ])
+                keyboard.append([InlineKeyboardButton("🔗 Host and Get Direct Link", callback_data="single:host")])
         
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
         
         await update.message.reply_text(
-            f"📎 Found **{len(urls)}** link(s)\n\n"
-            "Choose action:",
+            f"📎 Found **{len(urls)}** link(s)\n\nChoose action:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
-        
     except Exception as e:
         logger.error(f"Error handling text message: {e}", exc_info=True)
         await update.message.reply_text("❌ Failed to process your message.")
@@ -843,31 +785,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Operation cancelled.")
             return
 
-        # Handle file actions
         if data.startswith("file:"):
             await handle_file_callback(update, context, query, data)
             return
 
-        # Handle URL actions
         pending_urls = context.user_data.get("pending_urls")
         if not pending_urls:
             await query.edit_message_text("⏰ Session expired. Please send the links again.")
             return
 
         context.user_data.pop("pending_urls", None)
-
         action_type, action = data.split(":")
+        
         await query.edit_message_text(
-            f"⏳ Processing **{len(pending_urls)}** link(s)...\n"
-            f"Method: **{action}**\n\n"
-            "This may take a while depending on file size.",
+            f"⏳ Processing **{len(pending_urls)}** link(s)...\nMethod: **{action}**\n\nThis may take a while.",
             parse_mode='Markdown'
         )
 
-        asyncio.create_task(
-            process_links(update, context, pending_urls, action_type, action, query)
-        )
-        
+        asyncio.create_task(process_links(update, context, pending_urls, action_type, action, query))
     except Exception as e:
         logger.error(f"Error handling callback: {e}", exc_info=True)
         await query.edit_message_text("❌ Failed to process callback.")
@@ -887,12 +822,8 @@ async def handle_file_callback(update: Update, context, query, data):
         return
     
     context.user_data.pop("pending_file", None)
-    
     await query.edit_message_text("⏳ Processing file...\nThis may take a while.")
-    
-    asyncio.create_task(
-        process_file(update, context, pending_file, action, query)
-    )
+    asyncio.create_task(process_file(update, context, pending_file, action, query))
 
 async def process_file(update: Update, context, file_info, action, query):
     """Process uploaded file based on action."""
@@ -920,65 +851,30 @@ async def process_file(update: Update, context, file_info, action, query):
             await create_7z_archive([dl_path], archive_path, password)
             
             if config.get("enable_cache", True):
-                file_cache.cache_file(file_info["file_id"], {
-                    "file_hash": file_hash,
-                    "password": password,
-                    "hosted_file": None
-                })
+                file_cache.cache_file(file_info["file_id"], {"file_hash": file_hash, "password": password, "hosted_file": None})
             
             max_vol = max(1, config.get("max_telegram_size_mb", 50) - 1)
             
             if os.path.getsize(archive_path) > max_vol * 1024 * 1024:
                 await query.edit_message_text("📦 Splitting archive for Telegram...")
-                volumes = await create_split_7z(
-                    [archive_path],
-                    os.path.join(temp_dir, "split.7z"),
-                    password,
-                    max_vol
-                )
+                volumes = await create_split_7z([archive_path], os.path.join(temp_dir, "split.7z"), password, max_vol)
                 
                 total = len(volumes)
                 for i, vol in enumerate(volumes, 1):
-                    try:
-                        caption = f"📦 Part {i}/{total}"
-                        if password:
-                            caption += "\n🔒 Password protected"
-                        
-                        with open(vol, "rb") as fh:
-                            await context.bot.send_document(
-                                chat_id=query.message.chat_id,
-                                document=fh,
-                                filename=vol.name,
-                                caption=caption
-                            )
-                    except Exception as e:
-                        logger.error(f"Failed to send {vol.name}: {e}")
-                        await context.bot.send_message(
-                            chat_id=query.message.chat_id,
-                            text=f"❌ Failed to send part {i}: {vol.name}"
-                        )
-                
-                await query.edit_message_text(
-                    f"✅ 7z archive sent in {total} part(s)" +
-                    ("\n🔒 Password protected" if password else "")
-                )
-            else:
-                with open(archive_path, "rb") as fh:
-                    caption = "📦 7z Archive"
+                    caption = f"📦 Part {i}/{total}"
                     if password:
                         caption += "\n🔒 Password protected"
-                    
-                    await context.bot.send_document(
-                        chat_id=query.message.chat_id,
-                        document=fh,
-                        filename=archive_name,
-                        caption=caption
-                    )
+                    with open(vol, "rb") as fh:
+                        await context.bot.send_document(chat_id=query.message.chat_id, document=fh, filename=vol.name, caption=caption)
                 
-                await query.edit_message_text(
-                    "✅ 7z archive sent successfully" +
-                    ("\n🔒 Password protected" if password else "")
-                )
+                await query.edit_message_text(f"✅ 7z archive sent in {total} part(s)" + ("\n🔒 Password protected" if password else ""))
+            else:
+                caption = "📦 7z Archive"
+                if password:
+                    caption += "\n🔒 Password protected"
+                with open(archive_path, "rb") as fh:
+                    await context.bot.send_document(chat_id=query.message.chat_id, document=fh, filename=archive_name, caption=caption)
+                await query.edit_message_text("✅ 7z archive sent successfully" + ("\n🔒 Password protected" if password else ""))
         
         elif action == "host":
             host_base = config.get("host_base_url")
@@ -995,44 +891,23 @@ async def process_file(update: Update, context, file_info, action, query):
             shutil.move(archive_path, dest)
             
             meta = get_hosted_meta(context)
-            meta.append({
-                "filename": archive_name,
-                "created_at": time.time(),
-                "file_size": os.path.getsize(dest),
-                "file_hash": file_hash
-            })
+            meta.append({"filename": archive_name, "created_at": time.time(), "file_size": os.path.getsize(dest), "file_hash": file_hash})
             save_hosted_meta(meta)
             
             if config.get("enable_cache", True):
-                file_cache.cache_file(file_info["file_id"], {
-                    "file_hash": file_hash,
-                    "password": password,
-                    "hosted_file": archive_name
-                })
+                file_cache.cache_file(file_info["file_id"], {"file_hash": file_hash, "password": password, "hosted_file": archive_name})
             
             link = f"{host_base}/files/{archive_name}"
-            message, keyboard = create_link_message(
-                link, 
-                bool(password), 
-                config.get("store_time_hours", 48)
-            )
+            message, keyboard = create_link_message(link, bool(password), config.get("store_time_hours", 48))
             
-            await query.edit_message_text(
-                message,
-                parse_mode='Markdown',
-                reply_markup=keyboard,
-                disable_web_page_preview=False
-            )
+            await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard, disable_web_page_preview=False)
             
     except Exception as e:
         logger.error(f"File processing error: {e}", exc_info=True)
         try:
             await query.edit_message_text(f"❌ Processing error: {str(e)[:200]}")
         except:
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"❌ Processing error: {str(e)[:200]}"
-            )
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Processing error: {str(e)[:200]}")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1042,31 +917,12 @@ async def process_file(update: Update, context, file_info, action, query):
 async def download_with_aria2(urls: List[str], dest_dir: str) -> List[str]:
     """Download files using aria2c."""
     downloaded_files = set()
-    
-    for idx, url in enumerate(urls):
+    for url in urls:
         try:
             logger.info(f"Downloading with aria2: {url}")
+            cmd = ["aria2c", "--dir", dest_dir, "--max-connection-per-server=16", "--split=16", "--min-split-size=1M", "--continue=true", "--timeout=600", "--max-tries=5", "--retry-wait=5", "--console-log-level=error", url]
             
-            cmd = [
-                "aria2c",
-                "--dir", dest_dir,
-                "--max-connection-per-server=16",
-                "--split=16",
-                "--min-split-size=1M",
-                "--continue=true",
-                "--timeout=600",
-                "--max-tries=5",
-                "--retry-wait=5",
-                "--console-log-level=error",
-                url
-            ]
-            
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             stdout, stderr = await process.communicate()
             
             if process.returncode == 0:
@@ -1079,10 +935,8 @@ async def download_with_aria2(urls: List[str], dest_dir: str) -> List[str]:
                         logger.info(f"Downloaded: {file}")
             else:
                 logger.error(f"aria2 failed for {url}: {stderr.decode()}")
-                
         except Exception as e:
             logger.error(f"aria2 download failed for {url}: {e}")
-    
     return list(downloaded_files)
 
 async def download_direct(urls: List[str], dest_dir: str) -> List[str]:
@@ -1094,35 +948,27 @@ async def download_direct(urls: List[str], dest_dir: str) -> List[str]:
         for idx, url in enumerate(urls):
             try:
                 logger.info(f"Downloading: {url}")
-                
                 headers = {"User-Agent": "Mozilla/5.0"}
                 async with session.get(url, headers=headers) as resp:
                     resp.raise_for_status()
-                    
                     cd = resp.headers.get("Content-Disposition")
                     fname = None
                     if cd and "filename=" in cd:
                         fname_match = re.findall(r'filename[^;=\n]*=((["\']).*?\2|[^;\n]*)', cd)
                         if fname_match:
                             fname = fname_match[0][0].strip('"\'')
-                    
                     if not fname:
                         path = resp.url.path.rstrip("/")
                         fname = os.path.basename(path) or f"downloaded_{idx}"
-                    
                     fname = re.sub(r'[\\/*?:"<>|]', "_", fname)
                     filepath = os.path.join(dest_dir, fname)
-                    
                     with open(filepath, "wb") as f:
                         async for chunk in resp.content.iter_chunked(8192):
                             f.write(chunk)
-                    
                     downloaded.append(filepath)
                     logger.info(f"Downloaded: {fname}")
-                    
             except Exception as e:
                 logger.error(f"Failed to download {url}: {e}")
-    
     return downloaded
 
 # ----------------------------------------------------------------------
@@ -1131,43 +977,28 @@ async def download_direct(urls: List[str], dest_dir: str) -> List[str]:
 async def create_7z_archive(files: List[str], output_path: str, password: str = ""):
     """Create a 7z archive."""
     cmd = ["7z", "a", "-t7z", "-mx=1", output_path]
-    
     if password:
         cmd.extend([f"-p{password}", "-mhe=on"])
-    
     cmd.extend(files)
     
-    logger.info(f"Running 7z: 7z a -t7z -mx=1 {output_path} [files]")
-    
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
+    logger.info("Running 7z: 7z a -t7z -mx=1 [archive] [files]")
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await process.communicate()
     
     if process.returncode != 0:
         raise Exception(f"7z failed: {stderr.decode().strip()}")
-    
     return output_path
 
 async def create_split_7z(files: List[str], output_base: str, password: str, max_vol_mb: int) -> List[Path]:
     """Create split 7z archive for Telegram."""
     cmd = ["7z", "a", "-t7z", "-mx=0", f"-v{max_vol_mb}m"]
-    
     if password:
         cmd.extend([f"-p{password}", "-mhe=on"])
-    
     cmd.append(output_base)
     cmd.extend(files)
     
-    logger.info(f"Running 7z split: 7z a -t7z -mx=0 -v{max_vol_mb}m {output_base} [files]")
-    
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
+    logger.info(f"Running 7z split: 7z a -t7z -mx=0 -v{max_vol_mb}m [archive] [files]")
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await process.communicate()
     
     if process.returncode != 0:
@@ -1175,11 +1006,7 @@ async def create_split_7z(files: List[str], output_base: str, password: str, max
     
     output_dir = os.path.dirname(output_base)
     base_name = os.path.basename(output_base)
-    volumes = sorted(
-        [p for p in Path(output_dir).glob(base_name + "*") if not p.name.endswith('.tmp')],
-        key=lambda p: p.name
-    )
-    
+    volumes = sorted([p for p in Path(output_dir).glob(base_name + "*") if not p.name.endswith('.tmp')], key=lambda p: p.name)
     return volumes
 
 # ----------------------------------------------------------------------
@@ -1204,9 +1031,7 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             await query.edit_message_text("❌ Failed to download any file.")
             return
         
-        file_hashes = []
-        for f in files:
-            file_hashes.append(file_cache.get_file_hash(f))
+        file_hashes = [file_cache.get_file_hash(f) for f in files]
         
         await query.edit_message_text("📦 Creating 7z archive...")
         archive_name = f"{uuid4().hex}.7z"
@@ -1226,55 +1051,23 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             
             if os.path.getsize(archive_path) > max_vol * 1024 * 1024:
                 await query.edit_message_text("📦 Splitting archive for Telegram...")
-                volumes = await create_split_7z(
-                    [archive_path],
-                    os.path.join(temp_dir, "split.7z"),
-                    password,
-                    max_vol
-                )
+                volumes = await create_split_7z([archive_path], os.path.join(temp_dir, "split.7z"), password, max_vol)
                 
-                total = len(volumes)
                 for i, vol in enumerate(volumes, 1):
-                    try:
-                        caption = f"📦 Part {i}/{total}"
-                        if password:
-                            caption += "\n🔒 Password protected"
-                        
-                        with open(vol, "rb") as fh:
-                            await context.bot.send_document(
-                                chat_id=query.message.chat_id,
-                                document=fh,
-                                filename=vol.name,
-                                caption=caption
-                            )
-                    except Exception as e:
-                        logger.error(f"Failed to send {vol.name}: {e}")
-                        await context.bot.send_message(
-                            chat_id=query.message.chat_id,
-                            text=f"❌ Failed to send part {i}: {vol.name}"
-                        )
-                
-                await query.edit_message_text(
-                    f"✅ 7z archive sent in {total} part(s)" +
-                    ("\n🔒 Password protected" if password else "")
-                )
-            else:
-                with open(archive_path, "rb") as fh:
-                    caption = "📦 7z Archive"
+                    caption = f"📦 Part {i}/{len(volumes)}"
                     if password:
                         caption += "\n🔒 Password protected"
-                    
-                    await context.bot.send_document(
-                        chat_id=query.message.chat_id,
-                        document=fh,
-                        filename=archive_name,
-                        caption=caption
-                    )
+                    with open(vol, "rb") as fh:
+                        await context.bot.send_document(chat_id=query.message.chat_id, document=fh, filename=vol.name, caption=caption)
                 
-                await query.edit_message_text(
-                    "✅ 7z archive sent successfully" +
-                    ("\n🔒 Password protected" if password else "")
-                )
+                await query.edit_message_text(f"✅ 7z archive sent in {len(volumes)} part(s)" + ("\n🔒 Password protected" if password else ""))
+            else:
+                caption = "📦 7z Archive"
+                if password:
+                    caption += "\n🔒 Password protected"
+                with open(archive_path, "rb") as fh:
+                    await context.bot.send_document(chat_id=query.message.chat_id, document=fh, filename=archive_name, caption=caption)
+                await query.edit_message_text("✅ 7z archive sent successfully" + ("\n🔒 Password protected" if password else ""))
         
         elif action == "host":
             host_base = config.get("host_base_url")
@@ -1286,37 +1079,20 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             shutil.move(archive_path, dest)
             
             meta = get_hosted_meta(context)
-            meta.append({
-                "filename": archive_name,
-                "created_at": time.time(),
-                "file_size": os.path.getsize(dest),
-                "file_hash": file_hashes[0] if file_hashes else ""
-            })
+            meta.append({"filename": archive_name, "created_at": time.time(), "file_size": os.path.getsize(dest), "file_hash": file_hashes[0] if file_hashes else ""})
             save_hosted_meta(meta)
             
             link = f"{host_base}/files/{archive_name}"
-            message, keyboard = create_link_message(
-                link, 
-                bool(password), 
-                config.get("store_time_hours", 48)
-            )
+            message, keyboard = create_link_message(link, bool(password), config.get("store_time_hours", 48))
             
-            await query.edit_message_text(
-                message,
-                parse_mode='Markdown',
-                reply_markup=keyboard,
-                disable_web_page_preview=False
-            )
+            await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard, disable_web_page_preview=False)
             
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
         try:
             await query.edit_message_text(f"❌ Processing error: {str(e)[:200]}")
         except:
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"❌ Processing error: {str(e)[:200]}"
-            )
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Processing error: {str(e)[:200]}")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1337,7 +1113,6 @@ async def cleanup_loop(application: Application):
                 store_seconds = storage_hours * 3600
                 now = time.time()
                 new_meta = []
-                deleted = 0
                 
                 for entry in meta:
                     if now - entry["created_at"] > store_seconds:
@@ -1345,14 +1120,11 @@ async def cleanup_loop(application: Application):
                         if os.path.exists(filepath):
                             os.remove(filepath)
                             logger.info(f"Deleted expired file: {entry['filename']}")
-                            deleted += 1
                     else:
                         new_meta.append(entry)
                 
-                if deleted > 0:
-                    application.bot_data["hosted_meta"] = new_meta
-                    save_hosted_meta(new_meta)
-                    logger.info(f"Cleanup: removed {deleted} expired file(s)")
+                application.bot_data["hosted_meta"] = new_meta
+                save_hosted_meta(new_meta)
             
             if config.get("enable_cache", True):
                 file_cache._clean_expired(storage_hours)
@@ -1367,19 +1139,15 @@ async def handle_web_file(request: web.Request):
     """Serve hosted files."""
     try:
         filename = request.match_info["filename"]
-        
         if ".." in filename or filename.startswith("/"):
-            logger.warning(f"Blocked suspicious request: {filename}")
             raise web.HTTPForbidden()
         
         file_path = os.path.join(HOSTED_FILES_DIR, filename)
         if not os.path.isfile(file_path):
-            logger.warning(f"File not found: {filename}")
             raise web.HTTPNotFound()
         
         logger.info(f"Serving file: {filename}")
         return web.FileResponse(file_path)
-        
     except web.HTTPException:
         raise
     except Exception as e:
@@ -1399,15 +1167,12 @@ async def start_web_server(host: str, port: int):
         await site.start()
         
         logger.info(f"✅ Web server started on {host}:{port}")
-        
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             pass
         finally:
             await runner.cleanup()
-            logger.info("Web server stopped")
-            
     except Exception as e:
         logger.error(f"Failed to start web server: {e}")
 
@@ -1416,7 +1181,7 @@ async def start_web_server(host: str, port: int):
 # ----------------------------------------------------------------------
 async def main():
     """Main bot initialization and startup."""
-    global password_encryption
+    global password_encryption, file_cache
     
     try:
         if not os.path.exists(CONFIG_FILE):
@@ -1424,91 +1189,75 @@ async def main():
         else:
             config = load_config()
             if not config.get("token"):
-                logger.warning("Token missing in config, re-creating...")
                 config = create_config()
         
-        # Migrate from store_time_days to store_time_hours if needed
         if "store_time_days" in config and "store_time_hours" not in config:
             config["store_time_hours"] = config["store_time_days"] * 24
             del config["store_time_days"]
         
-        # Generate encryption key if not exists
         if not config.get("encryption_key"):
             config["encryption_key"] = secrets.token_hex(32)
-            save_config(config)
-            logger.info("Generated new encryption key")
         
         for k, v in DEFAULT_CONFIG.items():
             config.setdefault(k, v)
         
         save_config(config)
         
-        # Initialize password encryption
         password_encryption = PasswordEncryption(config["encryption_key"])
+        file_cache = FileCache(config.get("cache_db_file", "cache_db.json"))
         
         if config.get("download_method") == "aria2":
             check_aria2(config)
         
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "7z", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
+            proc = await asyncio.create_subprocess_exec("7z", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             await proc.communicate()
-            logger.info("7z is available")
         except Exception:
             logger.error("7z not found!")
-            print("❌ 7z is required but not found. Install it with: sudo apt install p7zip-full")
+            print("❌ 7z is required. Install: sudo apt install p7zip-full")
             return
         
         passwords = load_passwords()
         hosted_meta = load_hosted_meta()
         
         builder = ApplicationBuilder().token(config["token"])
-        
         if config.get("api_base_url"):
             builder.base_url(config["api_base_url"])
             if config.get("api_base_file_url"):
                 builder.base_file_url(config["api_base_file_url"])
         
         application = builder.build()
-        
         application.bot_data["config"] = config
         application.bot_data["passwords"] = passwords
         application.bot_data["hosted_meta"] = hosted_meta
         
+        # Command handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_cmd))
         application.add_handler(CommandHandler("setpassword", set_password))
         application.add_handler(CommandHandler("mypassword", my_password))
         application.add_handler(CommandHandler("removepassword", remove_password))
         application.add_handler(CommandHandler("status", status))
+        application.add_handler(CommandHandler("adminstatus", admin_status))
         application.add_handler(CommandHandler("clearcache", clear_cache))
         application.add_handler(CommandHandler("sethosturl", set_host_url))
         application.add_handler(CommandHandler("setstoretime", set_store_time))
         application.add_handler(CommandHandler("whitelist_add", whitelist_add))
         application.add_handler(CommandHandler("whitelist_remove", whitelist_remove))
         
+        # Message handlers
         application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
         application.add_handler(CallbackQueryHandler(handle_callback))
         
         async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
-            if update and update.effective_message:
-                try:
-                    await update.effective_message.reply_text(
-                        "❌ An unexpected error occurred. Please try again."
-                    )
-                except:
-                    pass
+            logger.error(f"Update caused error: {context.error}", exc_info=context.error)
         
         application.add_error_handler(error_handler)
         
         web_task = None
         if config.get("host_base_url"):
-            host = "0.0.0.0"
-            port = config.get("host_port", 8080)
-            web_task = asyncio.create_task(start_web_server(host, port))
+            web_task = asyncio.create_task(start_web_server("0.0.0.0", config.get("host_port", 8080)))
         
         cleanup_task = asyncio.create_task(cleanup_loop(application))
         
@@ -1527,16 +1276,9 @@ async def main():
             if web_task:
                 web_task.cancel()
             cleanup_task.cancel()
-            
             await application.updater.stop()
             await application.stop()
             await application.shutdown()
-            
-            try:
-                await asyncio.gather(web_task, cleanup_task, return_exceptions=True)
-            except asyncio.CancelledError:
-                pass
-            
             logger.info("Bot stopped")
             
     except Exception as e:
@@ -1544,8 +1286,4 @@ async def main():
         print(f"❌ Fatal error: {e}")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user")
-        logger.info("Bot stopped by user")
+    asyncio.run(main())
