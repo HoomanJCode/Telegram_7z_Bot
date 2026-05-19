@@ -1,4 +1,4 @@
-# 🤖 FileBot - Telegram Download Manager
+# 🤖 Telegram_7z_Bot
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
@@ -60,8 +60,8 @@ sudo apt update && sudo apt upgrade -y
 sudo apt install -y python3 python3-pip p7zip-full aria2
 
 # 3. Clone repository
-git clone https://github.com/yourusername/filebot.git
-cd filebot
+git clone https://github.com/hoomanJCode/Telegram_7z_Bot.git
+cd Telegram_7z_Bot
 
 # 4. Install Python dependencies
 pip3 install -r requirements.txt
@@ -83,8 +83,8 @@ pkg update && pkg upgrade -y
 pkg install python python-pip p7zip aria2 git -y
 
 # 3. Clone repository
-git clone https://github.com/yourusername/filebot.git
-cd filebot
+git clone https://github.com/HoomanJCode/Telegram_7z_Bot.git
+cd Telegram_7z_Bot
 
 # 4. Install Python dependencies
 pip install -r requirements.txt
@@ -99,7 +99,7 @@ python bot.py
 ### Quick Install (One-Liner)
 
 ```bash
-git clone https://github.com/yourusername/filebot.git && cd filebot && pip install -r requirements.txt && mkdir -p data/hosted_files && python bot.py
+git clone https://github.com/HoomanJCode/Telegram_7z_Bot.git && cd Telegram_7z_Bot && pip install -r requirements.txt && mkdir -p data/hosted_files && python bot.py
 ```
 
 ## ⚙️ Configuration
@@ -217,7 +217,7 @@ All files will be downloaded and packed into a single 7z archive.
 ## 🏗️ Project Structure
 
 ```
-filebot/
+Telegram_7z_Bot/
 ├── bot.py                 # Main entry point
 ├── config/                # Configuration management
 │   ├── __init__.py
@@ -268,7 +268,7 @@ Contributions are welcome! Here's how you can help:
 1. **Fork** the repository
 2. **Clone** your fork:
    ```bash
-   git clone https://github.com/yourusername/filebot.git
+   git clone https://github.com/HoomanJCode/Telegram_7z_Bot.git
    ```
 3. **Create a branch**:
    ```bash
@@ -389,7 +389,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ```
 MIT License
 
-Copyright (c) 2024 FileBot Contributors
+Copyright (c) 2024 Telegram_7z_Bot Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -444,7 +444,7 @@ This project serves as an example of effective human-AI collaboration in softwar
 
 <div align="center">
 
-**[⬆ Back to Top](#filebot---telegram-download-manager)**
+**[⬆ Back to Top](#Telegram_7z_Bot---telegram-download-manager)**
 
 Made with ❤️ by [Your Name] | Powered by DeepSeek AI
 
