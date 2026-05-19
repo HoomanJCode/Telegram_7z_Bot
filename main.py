@@ -13,7 +13,6 @@ from typing import List, Dict
 from uuid import uuid4
 
 import aiohttp
-import aiofiles
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -87,6 +86,8 @@ def create_config():
     cfg["token"] = token
     if api_base:
         cfg["api_base_url"] = api_base
+        # For Bale: api_base_url should be like https://tapi.bale.ai/bot
+        # File URL should be like https://tapi.bale.ai/file
         if "/bot" in api_base:
             cfg["api_base_file_url"] = api_base.replace("/bot", "/file")
         else:
@@ -361,6 +362,53 @@ async def whitelist_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error removing from whitelist: {e}", exc_info=True)
 
 # ----------------------------------------------------------------------
+# File Download Helper for Telegram/Bale
+# ----------------------------------------------------------------------
+async def download_telegram_file(file, dest_path: str) -> bool:
+    """Download a file from Telegram/Bale using direct HTTP request."""
+    try:
+        # Get file path from Telegram
+        file_path = file.file_path
+        
+        # Construct the download URL
+        # For Bale, we need to use the correct file URL format
+        bot = file.get_bot()
+        
+        # Use the bot's built-in download method but with error handling
+        await file.download_to_drive(dest_path)
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error downloading Telegram file: {e}")
+        
+        # Fallback: try direct HTTP download
+        try:
+            bot = file.get_bot()
+            file_path = file.file_path
+            
+            # Get the base URL from bot configuration
+            base_url = bot.base_file_url if hasattr(bot, 'base_file_url') else "https://api.telegram.org/file"
+            token = bot.token
+            
+            # Construct URL properly
+            download_url = f"{base_url}/bot{token}/{file_path}"
+            logger.info(f"Trying fallback download URL: {download_url}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                    if resp.status == 200:
+                        with open(dest_path, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(8192):
+                                f.write(chunk)
+                        return True
+                    else:
+                        logger.error(f"Fallback download failed with status {resp.status}")
+                        return False
+        except Exception as e2:
+            logger.error(f"Fallback download also failed: {e2}")
+            return False
+
+# ----------------------------------------------------------------------
 # Message Handlers
 # ----------------------------------------------------------------------
 @restricted
@@ -386,7 +434,14 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         dl_path = os.path.join(temp_dir, original_name)
         
         status_msg = await update.message.reply_text("📥 Downloading file...")
-        await file.download_to_drive(dl_path)
+        
+        # Try to download with better error handling
+        success = await download_telegram_file(file, dl_path)
+        
+        if not success:
+            await status_msg.edit_text("❌ Failed to download file from server.")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return
         
         # Create 7z archive
         await status_msg.edit_text("📦 Creating 7z archive...")
@@ -553,7 +608,6 @@ async def download_with_aria2(urls: List[str], dest_dir: str) -> List[str]:
             stdout, stderr = await process.communicate()
             
             if process.returncode == 0:
-                # Find new files in dest_dir
                 for file in os.listdir(dest_dir):
                     if file.endswith('.aria2'):
                         continue
@@ -657,7 +711,6 @@ async def create_split_7z(files: List[str], output_base: str, password: str, max
     if process.returncode != 0:
         raise Exception(f"7z split failed: {stderr.decode().strip()}")
     
-    # Find all volumes
     output_dir = os.path.dirname(output_base)
     base_name = os.path.basename(output_base)
     volumes = sorted(
@@ -679,7 +732,6 @@ async def process_links(update: Update, context, urls, action_type, action, quer
     temp_dir = tempfile.mkdtemp(prefix="dl_")
     
     try:
-        # Download files
         await query.edit_message_text("📥 Downloading files...")
         
         if config.get("download_method") == "aria2":
@@ -691,18 +743,15 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             await query.edit_message_text("❌ Failed to download any file.")
             return
         
-        # Create 7z archive
         await query.edit_message_text("📦 Creating 7z archive...")
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await create_7z_archive(files, archive_path, password)
         
         if action == "telegram":
-            # Send via Telegram (split if needed)
             max_vol = max(1, config.get("max_telegram_size_mb", 50) - 1)
             
             if os.path.getsize(archive_path) > max_vol * 1024 * 1024:
-                # Need to split
                 await query.edit_message_text("📦 Splitting archive for Telegram...")
                 volumes = await create_split_7z(
                     [archive_path],
@@ -711,7 +760,6 @@ async def process_links(update: Update, context, urls, action_type, action, quer
                     max_vol
                 )
                 
-                # Send volumes
                 total = len(volumes)
                 for i, vol in enumerate(volumes, 1):
                     try:
@@ -738,7 +786,6 @@ async def process_links(update: Update, context, urls, action_type, action, quer
                     ("\n🔒 Password protected" if password else "")
                 )
             else:
-                # Send single file
                 with open(archive_path, "rb") as fh:
                     caption = "📦 7z Archive"
                     if password:
@@ -757,7 +804,6 @@ async def process_links(update: Update, context, urls, action_type, action, quer
                 )
         
         elif action == "host":
-            # Host the archive
             host_base = config.get("host_base_url")
             if not host_base:
                 await query.edit_message_text("❌ Direct link feature not configured.")
@@ -766,7 +812,6 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             dest = os.path.join(HOSTED_FILES_DIR, archive_name)
             shutil.move(archive_path, dest)
             
-            # Add metadata
             meta = get_hosted_meta(context)
             meta.append({
                 "filename": archive_name,
@@ -894,7 +939,6 @@ async def start_web_server(host: str, port: int):
 async def main():
     """Main bot initialization and startup."""
     try:
-        # Load or create config
         if not os.path.exists(CONFIG_FILE):
             config = create_config()
         else:
@@ -903,17 +947,14 @@ async def main():
                 logger.warning("Token missing in config, re-creating...")
                 config = create_config()
         
-        # Set defaults
         for k, v in DEFAULT_CONFIG.items():
             config.setdefault(k, v)
         
         save_config(config)
         
-        # Check dependencies
         if config.get("download_method") == "aria2":
             check_aria2(config)
         
-        # Check 7z
         try:
             proc = await asyncio.create_subprocess_exec(
                 "7z", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -925,11 +966,9 @@ async def main():
             print("❌ 7z is required but not found. Install it with: sudo apt install p7zip-full")
             return
         
-        # Load data
         passwords = load_passwords()
         hosted_meta = load_hosted_meta()
         
-        # Build application
         builder = ApplicationBuilder().token(config["token"])
         
         if config.get("api_base_url"):
@@ -939,12 +978,10 @@ async def main():
         
         application = builder.build()
         
-        # Store data in bot_data
         application.bot_data["config"] = config
         application.bot_data["passwords"] = passwords
         application.bot_data["hosted_meta"] = hosted_meta
         
-        # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_cmd))
         application.add_handler(CommandHandler("setpassword", set_password))
@@ -959,7 +996,6 @@ async def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
         application.add_handler(CallbackQueryHandler(handle_callback))
         
-        # Error handler
         async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
             if update and update.effective_message:
@@ -972,17 +1008,14 @@ async def main():
         
         application.add_error_handler(error_handler)
         
-        # Start web server
         web_task = None
         if config.get("host_base_url"):
             host = "0.0.0.0"
             port = config.get("host_port", 8080)
             web_task = asyncio.create_task(start_web_server(host, port))
         
-        # Start cleanup
         cleanup_task = asyncio.create_task(cleanup_loop(application))
         
-        # Start bot
         await application.initialize()
         await application.start()
         await application.updater.start_polling()
