@@ -13,13 +13,13 @@ class WebServer:
         self.port = port
         self.file_manager = FileManager()
         self._runner = None
+        self._site = None
     
     async def handle_file_request(self, request: web.Request):
         """Serve hosted files."""
         try:
             filename = request.match_info["filename"]
             
-            # Security check
             if ".." in filename or filename.startswith("/"):
                 logger.warning(f"Blocked suspicious request: {filename}")
                 raise web.HTTPForbidden()
@@ -51,24 +51,20 @@ class WebServer:
             
             self._runner = web.AppRunner(app)
             await self._runner.setup()
-            site = web.TCPSite(self._runner, self.host, self.port)
-            await site.start()
+            self._site = web.TCPSite(self._runner, self.host, self.port)
+            await self._site.start()
             
-            logger.info(f"✅ Web server started on {self.host}:{self.port}")
-            
-            # Keep running until cancelled
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                pass
+            logger.info(f"Web server started on {self.host}:{self.port}")
             
         except Exception as e:
             logger.error(f"Failed to start web server: {e}")
-        finally:
-            await self.stop()
+            raise
     
     async def stop(self):
         """Stop the web server."""
-        if self._runner:
-            await self._runner.cleanup()
-            logger.info("Web server stopped")
+        try:
+            if self._runner:
+                await self._runner.cleanup()
+                logger.info("Web server stopped")
+        except Exception as e:
+            logger.error(f"Error stopping web server: {e}")
