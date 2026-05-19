@@ -1,0 +1,18 @@
+{
+  "urls": {
+    "f25516a5b0cc1f3984b610fd951105e1846a064193c60164b4912b753e1c5880": {
+      "file_hash": "3999b6beb20b45d7ecc5e887cfa9c209e6599ba48c4f8a602216c4ccb644ce0f",
+      "password": "tst123",
+      "hosted_file": null,
+      "cached_at": 1779228002.5387087
+    }
+  },
+  "files": {
+    "1409348323:3851473721583214337:1:fb8348b4358b1a323554ed8b0a89dec222e36905b00d181e4eaa6b0efdb71626f11f25ed76c4b81b": {
+      "hash": "bc4daa3c55f8ce4ed326f9f790bdd2d20a07e916d0a339d55d6d902aaa40bb14",
+      "password": "tst123",
+      "hosted_file": "027f3f7cdd5848f9a0b8014afe07a871.7z",
+      "cached_at": 1779229298.5973945
+    }
+  }
+}
