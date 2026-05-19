@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +14,9 @@ import time
 from pathlib import Path
 from typing import List, Dict, Optional
 from uuid import uuid4
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 import aiohttp
 from aiohttp import web
@@ -40,6 +45,63 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
+# Password Encryption
+# ----------------------------------------------------------------------
+class PasswordEncryption:
+    """Handle encrypted password storage using user ID and secret key."""
+    
+    def __init__(self, secret_key: str = None):
+        """Initialize with optional secret key."""
+        if secret_key:
+            self.secret_key = secret_key
+        else:
+            self.secret_key = self._generate_secret_key()
+    
+    @staticmethod
+    def _generate_secret_key() -> str:
+        """Generate a random secret key."""
+        return secrets.token_hex(32)
+    
+    def _derive_key(self, user_id: str) -> bytes:
+        """Derive encryption key from user ID and secret key."""
+        # Combine user ID and secret key
+        combined = f"{user_id}:{self.secret_key}".encode()
+        
+        # Use PBKDF2 to derive a key
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b"filebot_salt_2024",  # Fixed salt for reproducibility
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(combined))
+        return key
+    
+    def encrypt_password(self, user_id: str, password: str) -> str:
+        """Encrypt password for a specific user."""
+        if not password:
+            return ""
+        
+        key = self._derive_key(user_id)
+        f = Fernet(key)
+        encrypted = f.encrypt(password.encode())
+        return encrypted.decode()
+    
+    def decrypt_password(self, user_id: str, encrypted_password: str) -> str:
+        """Decrypt password for a specific user."""
+        if not encrypted_password:
+            return ""
+        
+        try:
+            key = self._derive_key(user_id)
+            f = Fernet(key)
+            decrypted = f.decrypt(encrypted_password.encode())
+            return decrypted.decode()
+        except Exception as e:
+            logger.error(f"Failed to decrypt password for user {user_id}: {e}")
+            return ""
+
+# ----------------------------------------------------------------------
 # Default config
 # ----------------------------------------------------------------------
 DEFAULT_CONFIG = {
@@ -48,7 +110,7 @@ DEFAULT_CONFIG = {
     "api_base_file_url": "",
     "host_base_url": "",
     "host_port": 8080,
-    "store_time_hours": 48,  # Changed from store_time_days to hours
+    "store_time_hours": 48,
     "max_telegram_size_mb": 50,
     "whitelist": [],
     "admin_ids": [],
@@ -57,12 +119,16 @@ DEFAULT_CONFIG = {
     "aria2_secret": "",
     "enable_cache": True,
     "cache_db_file": "cache_db.json",
+    "encryption_key": "",  # Will be generated on first run
 }
 
 CONFIG_FILE = "config.json"
 PASSWORDS_FILE = "passwords.json"
 HOSTED_FILES_DIR = "hosted_files"
 HOSTED_META_FILE = os.path.join(HOSTED_FILES_DIR, "metadata.json")
+
+# Global encryption instance
+password_encryption = None
 
 # ----------------------------------------------------------------------
 # Cache/Deduplication System
@@ -94,7 +160,6 @@ class FileCache:
         now = time.time()
         max_age_seconds = max_age_hours * 3600
         
-        # Clean URL cache
         expired_urls = []
         for url_hash, entry in self.cache["urls"].items():
             if now - entry["cached_at"] > max_age_seconds:
@@ -102,7 +167,6 @@ class FileCache:
         for url_hash in expired_urls:
             del self.cache["urls"][url_hash]
         
-        # Clean file cache
         expired_files = []
         for file_id, entry in self.cache["files"].items():
             if now - entry["cached_at"] > max_age_seconds:
@@ -174,6 +238,10 @@ def create_config():
     
     cfg = DEFAULT_CONFIG.copy()
     cfg["token"] = token
+    
+    # Generate random encryption key
+    cfg["encryption_key"] = secrets.token_hex(32)
+    
     if api_base:
         cfg["api_base_url"] = api_base
         if "/bot" in api_base:
@@ -203,17 +271,18 @@ def create_config():
     
     save_config(cfg)
     print(f"Config saved to {CONFIG_FILE}.")
+    print(f"Encryption key generated and saved in config.")
     return cfg
 
 def load_passwords() -> Dict[str, str]:
-    """Load user passwords."""
+    """Load encrypted passwords."""
     if not os.path.exists(PASSWORDS_FILE):
         return {}
     with open(PASSWORDS_FILE, "r") as f:
         return json.load(f)
 
 def save_passwords(passwords: Dict[str, str]):
-    """Save user passwords."""
+    """Save encrypted passwords."""
     with open(PASSWORDS_FILE, "w") as f:
         json.dump(passwords, f, indent=2)
 
@@ -247,6 +316,24 @@ def get_hosted_meta(context: ContextTypes.DEFAULT_TYPE) -> list:
     """Get hosted meta from application bot_data."""
     return context.application.bot_data["hosted_meta"]
 
+def get_user_password(context: ContextTypes.DEFAULT_TYPE, user_id: str) -> str:
+    """Get decrypted password for user."""
+    encrypted_passwords = get_passwords(context)
+    encrypted = encrypted_passwords.get(user_id, "")
+    if encrypted:
+        return password_encryption.decrypt_password(user_id, encrypted)
+    return ""
+
+def set_user_password(context: ContextTypes.DEFAULT_TYPE, user_id: str, password: str):
+    """Set encrypted password for user."""
+    encrypted_passwords = get_passwords(context)
+    if password:
+        encrypted = password_encryption.encrypt_password(user_id, password)
+        encrypted_passwords[user_id] = encrypted
+    else:
+        encrypted_passwords.pop(user_id, None)
+    save_passwords(encrypted_passwords)
+
 def check_aria2(config: dict) -> bool:
     """Check if aria2 is available."""
     if config.get("download_method") != "aria2":
@@ -273,21 +360,19 @@ def format_storage_time(hours: int) -> str:
         days = hours / 24
         return f"{days:.1f} day(s)"
 
-def create_link_message(link: str, password: str = "", storage_hours: int = 48) -> tuple:
-    """Create a message with clickable link and copy-able text."""
+def create_link_message(link: str, has_password: bool = False, storage_hours: int = 48) -> tuple:
+    """Create a message with clickable link and copy-able text (no password shown)."""
     message = (
         f"✅ File archived and hosted!\n\n"
         f"📎 **Direct Link:**\n"
         f"`{link}`\n\n"
         f"[Click Here to Open]({link})"
     )
-    if password:
-        message += f"\n\n🔒 **Password:** `{password}`"
+    if has_password:
+        message += f"\n\n🔒 **Password Protected** (use your set password to extract)"
     message += f"\n\n⏰ Expires in: {format_storage_time(storage_hours)}"
     
     keyboard = [[InlineKeyboardButton("🔗 Open Link", url=link)]]
-    if password:
-        keyboard.append([InlineKeyboardButton("📋 Copy Password", callback_data=f"copy_pass:{password}")])
     
     return message, InlineKeyboardMarkup(keyboard)
 
@@ -338,8 +423,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Send a file → Choose to send as 7z or get direct link\n"
             "• File caching enabled (no duplicates)\n\n"
             "**Commands:**\n"
-            "/setpassword `<pass>` - Set your 7z password\n"
-            "/mypassword - Show current password status\n"
+            "/setpassword `<pass>` - Set your 7z password (encrypted)\n"
+            "/mypassword - Check if password is set\n"
+            "/removepassword - Remove your password\n"
             "/status - Show bot status\n"
             "/clearcache - Clear file cache\n"
             f"Download method: **{download_method}**\n"
@@ -359,39 +445,67 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @restricted
 async def set_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set 7z password for user."""
+    """Set 7z password for user (encrypted storage)."""
     try:
         user_id = str(update.effective_user.id)
         args = context.args
+        
+        # Delete the command message for privacy
+        await update.message.delete()
+        
         if not args:
-            await update.message.reply_text("Usage: `/setpassword <your_password>`", parse_mode='Markdown')
+            # Send ephemeral message
+            msg = await update.message.reply_text(
+                "Usage: `/setpassword <your_password>`\n"
+                "⚠️ This message will be deleted for privacy.",
+                parse_mode='Markdown'
+            )
+            await asyncio.sleep(10)
+            await msg.delete()
             return
         
         password = " ".join(args)
-        passwords = get_passwords(context)
-        passwords[user_id] = password
-        save_passwords(passwords)
-        await update.message.reply_text("✅ Your 7z password has been saved.")
-        logger.info(f"User {user_id} set password")
+        set_user_password(context, user_id, password)
+        
+        msg = await update.message.reply_text("✅ Your 7z password has been saved (encrypted).")
+        await asyncio.sleep(5)
+        await msg.delete()
+        
+        logger.info(f"User {user_id} set password (encrypted)")
     except Exception as e:
         logger.error(f"Error setting password: {e}", exc_info=True)
-        await update.message.reply_text("❌ Failed to set password.")
 
 @restricted
 async def my_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show password status."""
+    """Show if password is set (never show the actual password)."""
     try:
         user_id = str(update.effective_user.id)
-        passwords = get_passwords(context)
-        if user_id in passwords:
-            await update.message.reply_text(
-                f"✅ You have a password set.\nPassword: `{passwords[user_id]}`",
-                parse_mode='Markdown'
-            )
+        encrypted_passwords = get_passwords(context)
+        
+        if user_id in encrypted_passwords and encrypted_passwords[user_id]:
+            msg = await update.message.reply_text("✅ You have a password set.\nUse /removepassword to remove it.")
         else:
-            await update.message.reply_text("❌ No password set. Use /setpassword to set one.")
+            msg = await update.message.reply_text("❌ No password set. Use /setpassword to set one.")
+        
+        await asyncio.sleep(10)
+        await msg.delete()
     except Exception as e:
-        logger.error(f"Error showing password: {e}", exc_info=True)
+        logger.error(f"Error checking password: {e}", exc_info=True)
+
+@restricted
+async def remove_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove user's password."""
+    try:
+        user_id = str(update.effective_user.id)
+        set_user_password(context, user_id, "")
+        
+        msg = await update.message.reply_text("✅ Your password has been removed.")
+        await asyncio.sleep(5)
+        await msg.delete()
+        
+        logger.info(f"User {user_id} removed password")
+    except Exception as e:
+        logger.error(f"Error removing password: {e}", exc_info=True)
 
 @restricted
 async def clear_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -422,6 +536,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Max file size: `{config.get('max_telegram_size_mb', 50)}` MB\n"
             f"Whitelist enabled: `{'Yes' if config.get('whitelist') else 'No'}`\n"
             f"Caching enabled: `{'Yes' if config.get('enable_cache', True) else 'No'}`\n"
+            f"Password encryption: `Active`\n"
         )
         await update.message.reply_text(status_text, parse_mode='Markdown')
     except Exception as e:
@@ -565,9 +680,10 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 
                 if cached.get("hosted_file") and host_base:
                     link = f"{host_base}/files/{cached['hosted_file']}"
+                    has_password = bool(cached.get("password", ""))
                     message, keyboard = create_link_message(
                         link, 
-                        cached.get("password", ""),
+                        has_password,
                         config.get("store_time_hours", 48)
                     )
                     message = "🔄 **Cached File Found!**\n\n" + message
@@ -650,9 +766,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     for url, cached in cached_results:
                         if cached.get("hosted_file"):
                             link = f"{host_base}/files/{cached['hosted_file']}"
+                            has_password = bool(cached.get("password", ""))
                             message, keyboard = create_link_message(
                                 link,
-                                cached.get("password", ""),
+                                has_password,
                                 config.get("store_time_hours", 48)
                             )
                             message = f"🔄 **Cached result for:**\n`{url}`\n\n" + message
@@ -668,11 +785,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                                 parse_mode='Markdown'
                             )
                     
-                    # If all URLs were cached, return
                     if len(cached_results) == len(urls):
                         return
                     
-                    # Remove cached URLs from pending list
                     urls = [url for url in urls if url not in [c[0] for c in cached_results]]
 
         context.user_data["pending_urls"] = urls
@@ -726,12 +841,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("pending_urls", None)
             context.user_data.pop("pending_file", None)
             await query.edit_message_text("❌ Operation cancelled.")
-            return
-
-        # Handle copy password callback
-        if data.startswith("copy_pass:"):
-            password = data.split(":", 1)[1]
-            await query.answer(f"Password: {password}", show_alert=True)
             return
 
         # Handle file actions
@@ -789,8 +898,7 @@ async def process_file(update: Update, context, file_info, action, query):
     """Process uploaded file based on action."""
     user_id = update.effective_user.id
     config = get_config(context)
-    passwords = get_passwords(context)
-    password = passwords.get(str(user_id), "")
+    password = get_user_password(context, str(user_id))
     temp_dir = tempfile.mkdtemp(prefix="file_")
     
     try:
@@ -803,7 +911,6 @@ async def process_file(update: Update, context, file_info, action, query):
             await query.edit_message_text("❌ Failed to download file from server.")
             return
         
-        # Calculate file hash for caching
         file_hash = file_cache.get_file_hash(dl_path)
         
         if action == "telegram":
@@ -812,7 +919,6 @@ async def process_file(update: Update, context, file_info, action, query):
             archive_path = os.path.join(temp_dir, archive_name)
             await create_7z_archive([dl_path], archive_path, password)
             
-            # Cache the result
             if config.get("enable_cache", True):
                 file_cache.cache_file(file_info["file_id"], {
                     "file_hash": file_hash,
@@ -897,7 +1003,6 @@ async def process_file(update: Update, context, file_info, action, query):
             })
             save_hosted_meta(meta)
             
-            # Cache the result
             if config.get("enable_cache", True):
                 file_cache.cache_file(file_info["file_id"], {
                     "file_hash": file_hash,
@@ -908,7 +1013,7 @@ async def process_file(update: Update, context, file_info, action, query):
             link = f"{host_base}/files/{archive_name}"
             message, keyboard = create_link_message(
                 link, 
-                password, 
+                bool(password), 
                 config.get("store_time_hours", 48)
             )
             
@@ -1032,7 +1137,7 @@ async def create_7z_archive(files: List[str], output_path: str, password: str = 
     
     cmd.extend(files)
     
-    logger.info(f"Running 7z: {' '.join(cmd)}")
+    logger.info(f"Running 7z: 7z a -t7z -mx=1 {output_path} [files]")
     
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -1056,7 +1161,7 @@ async def create_split_7z(files: List[str], output_base: str, password: str, max
     cmd.append(output_base)
     cmd.extend(files)
     
-    logger.info(f"Running 7z split: {' '.join(cmd)}")
+    logger.info(f"Running 7z split: 7z a -t7z -mx=0 -v{max_vol_mb}m {output_base} [files]")
     
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -1084,8 +1189,7 @@ async def process_links(update: Update, context, urls, action_type, action, quer
     """Process downloaded links based on action."""
     user_id = update.effective_user.id
     config = get_config(context)
-    passwords = get_passwords(context)
-    password = passwords.get(str(user_id), "")
+    password = get_user_password(context, str(user_id))
     temp_dir = tempfile.mkdtemp(prefix="dl_")
     
     try:
@@ -1100,7 +1204,6 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             await query.edit_message_text("❌ Failed to download any file.")
             return
         
-        # Calculate file hashes for caching
         file_hashes = []
         for f in files:
             file_hashes.append(file_cache.get_file_hash(f))
@@ -1110,7 +1213,6 @@ async def process_links(update: Update, context, urls, action_type, action, quer
         archive_path = os.path.join(temp_dir, archive_name)
         await create_7z_archive(files, archive_path, password)
         
-        # Cache URLs if enabled
         if config.get("enable_cache", True):
             for i, url in enumerate(urls):
                 file_cache.cache_url(url, {
@@ -1195,7 +1297,7 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             link = f"{host_base}/files/{archive_name}"
             message, keyboard = create_link_message(
                 link, 
-                password, 
+                bool(password), 
                 config.get("store_time_hours", 48)
             )
             
@@ -1231,7 +1333,6 @@ async def cleanup_loop(application: Application):
             meta = application.bot_data.get("hosted_meta", [])
             storage_hours = config.get("store_time_hours", 48)
             
-            # Clean hosted files
             if meta:
                 store_seconds = storage_hours * 3600
                 now = time.time()
@@ -1253,7 +1354,6 @@ async def cleanup_loop(application: Application):
                     save_hosted_meta(new_meta)
                     logger.info(f"Cleanup: removed {deleted} expired file(s)")
             
-            # Clean cache
             if config.get("enable_cache", True):
                 file_cache._clean_expired(storage_hours)
                 
@@ -1316,6 +1416,8 @@ async def start_web_server(host: str, port: int):
 # ----------------------------------------------------------------------
 async def main():
     """Main bot initialization and startup."""
+    global password_encryption
+    
     try:
         if not os.path.exists(CONFIG_FILE):
             config = create_config()
@@ -1330,10 +1432,19 @@ async def main():
             config["store_time_hours"] = config["store_time_days"] * 24
             del config["store_time_days"]
         
+        # Generate encryption key if not exists
+        if not config.get("encryption_key"):
+            config["encryption_key"] = secrets.token_hex(32)
+            save_config(config)
+            logger.info("Generated new encryption key")
+        
         for k, v in DEFAULT_CONFIG.items():
             config.setdefault(k, v)
         
         save_config(config)
+        
+        # Initialize password encryption
+        password_encryption = PasswordEncryption(config["encryption_key"])
         
         if config.get("download_method") == "aria2":
             check_aria2(config)
@@ -1369,6 +1480,7 @@ async def main():
         application.add_handler(CommandHandler("help", help_cmd))
         application.add_handler(CommandHandler("setpassword", set_password))
         application.add_handler(CommandHandler("mypassword", my_password))
+        application.add_handler(CommandHandler("removepassword", remove_password))
         application.add_handler(CommandHandler("status", status))
         application.add_handler(CommandHandler("clearcache", clear_cache))
         application.add_handler(CommandHandler("sethosturl", set_host_url))
