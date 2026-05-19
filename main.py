@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -9,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 from uuid import uuid4
 
 import aiohttp
@@ -47,19 +48,108 @@ DEFAULT_CONFIG = {
     "api_base_file_url": "",
     "host_base_url": "",
     "host_port": 8080,
-    "store_time_days": 2,
+    "store_time_hours": 48,  # Changed from store_time_days to hours
     "max_telegram_size_mb": 50,
     "whitelist": [],
     "admin_ids": [],
     "download_method": "aria2",
     "aria2_rpc_url": "http://localhost:6800/jsonrpc",
     "aria2_secret": "",
+    "enable_cache": True,
+    "cache_db_file": "cache_db.json",
 }
 
 CONFIG_FILE = "config.json"
 PASSWORDS_FILE = "passwords.json"
 HOSTED_FILES_DIR = "hosted_files"
 HOSTED_META_FILE = os.path.join(HOSTED_FILES_DIR, "metadata.json")
+
+# ----------------------------------------------------------------------
+# Cache/Deduplication System
+# ----------------------------------------------------------------------
+class FileCache:
+    """Cache system to prevent duplicate file downloads and uploads."""
+    
+    def __init__(self, cache_file: str = "cache_db.json"):
+        self.cache_file = cache_file
+        self.cache = self._load_cache()
+    
+    def _load_cache(self) -> dict:
+        """Load cache from file."""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, "r") as f:
+                    return json.load(f)
+            except:
+                return {"urls": {}, "files": {}}
+        return {"urls": {}, "files": {}}
+    
+    def _save_cache(self):
+        """Save cache to file."""
+        with open(self.cache_file, "w") as f:
+            json.dump(self.cache, f, indent=2)
+    
+    def _clean_expired(self, max_age_hours: int):
+        """Remove expired entries from cache."""
+        now = time.time()
+        max_age_seconds = max_age_hours * 3600
+        
+        # Clean URL cache
+        expired_urls = []
+        for url_hash, entry in self.cache["urls"].items():
+            if now - entry["cached_at"] > max_age_seconds:
+                expired_urls.append(url_hash)
+        for url_hash in expired_urls:
+            del self.cache["urls"][url_hash]
+        
+        # Clean file cache
+        expired_files = []
+        for file_id, entry in self.cache["files"].items():
+            if now - entry["cached_at"] > max_age_seconds:
+                expired_files.append(file_id)
+        for file_id in expired_files:
+            del self.cache["files"][file_id]
+        
+        if expired_urls or expired_files:
+            self._save_cache()
+            logger.info(f"Cleaned {len(expired_urls)} URL and {len(expired_files)} file cache entries")
+    
+    def get_cached_url(self, url: str) -> Optional[dict]:
+        """Check if URL result is cached."""
+        url_hash = hashlib.sha256(url.encode()).hexdigest()
+        return self.cache["urls"].get(url_hash)
+    
+    def cache_url(self, url: str, file_info: dict):
+        """Cache URL download result."""
+        url_hash = hashlib.sha256(url.encode()).hexdigest()
+        self.cache["urls"][url_hash] = {
+            **file_info,
+            "cached_at": time.time()
+        }
+        self._save_cache()
+    
+    def get_cached_file(self, file_id: str) -> Optional[dict]:
+        """Check if Telegram file is cached."""
+        return self.cache["files"].get(file_id)
+    
+    def cache_file(self, file_id: str, file_info: dict):
+        """Cache Telegram file result."""
+        self.cache["files"][file_id] = {
+            **file_info,
+            "cached_at": time.time()
+        }
+        self._save_cache()
+    
+    def get_file_hash(self, file_path: str) -> str:
+        """Calculate SHA256 hash of a file."""
+        sha256 = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+
+# Global cache instance
+file_cache = FileCache()
 
 # ----------------------------------------------------------------------
 # Helper Functions
@@ -102,6 +192,14 @@ def create_config():
         aria_secret = input("Aria2 RPC secret (press Enter if none): ").strip()
         if aria_secret:
             cfg["aria2_secret"] = aria_secret
+    
+    store_hours = input("File storage time in hours [default: 48]: ").strip()
+    if store_hours.isdigit():
+        cfg["store_time_hours"] = int(store_hours)
+    
+    enable_cache = input("Enable file caching/deduplication? (yes/no) [default: yes]: ").strip().lower()
+    if enable_cache in ["no", "n"]:
+        cfg["enable_cache"] = False
     
     save_config(cfg)
     print(f"Config saved to {CONFIG_FILE}.")
@@ -165,6 +263,34 @@ def check_aria2(config: dict) -> bool:
     config["download_method"] = "direct"
     return False
 
+def format_storage_time(hours: int) -> str:
+    """Format storage time in human readable format."""
+    if hours < 1:
+        return f"{int(hours * 60)} minutes"
+    elif hours < 24:
+        return f"{hours} hour(s)"
+    else:
+        days = hours / 24
+        return f"{days:.1f} day(s)"
+
+def create_link_message(link: str, password: str = "", storage_hours: int = 48) -> tuple:
+    """Create a message with clickable link and copy-able text."""
+    message = (
+        f"✅ File archived and hosted!\n\n"
+        f"📎 **Direct Link:**\n"
+        f"`{link}`\n\n"
+        f"[Click Here to Open]({link})"
+    )
+    if password:
+        message += f"\n\n🔒 **Password:** `{password}`"
+    message += f"\n\n⏰ Expires in: {format_storage_time(storage_hours)}"
+    
+    keyboard = [[InlineKeyboardButton("🔗 Open Link", url=link)]]
+    if password:
+        keyboard.append([InlineKeyboardButton("📋 Copy Password", callback_data=f"copy_pass:{password}")])
+    
+    return message, InlineKeyboardMarkup(keyboard)
+
 # ----------------------------------------------------------------------
 # Access Control Decorators
 # ----------------------------------------------------------------------
@@ -202,18 +328,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         config = get_config(context)
         download_method = config.get("download_method", "direct")
+        storage_hours = config.get("store_time_hours", 48)
         
         await update.message.reply_text(
             "🤖 **File Download Bot**\n\n"
             "**Features:**\n"
             "• Send a link → Download and pack to 7z\n"
             "• Send multiple links → Batch download to single 7z\n"
-            "• Send a file → Choose to send as 7z or get direct link\n\n"
+            "• Send a file → Choose to send as 7z or get direct link\n"
+            "• File caching enabled (no duplicates)\n\n"
             "**Commands:**\n"
             "/setpassword `<pass>` - Set your 7z password\n"
             "/mypassword - Show current password status\n"
             "/status - Show bot status\n"
-            f"Download method: **{download_method}**\n\n"
+            "/clearcache - Clear file cache\n"
+            f"Download method: **{download_method}**\n"
+            f"Storage time: **{format_storage_time(storage_hours)}**\n\n"
             "Just send me a link or file to get started!",
             parse_mode='Markdown'
         )
@@ -264,19 +394,34 @@ async def my_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error showing password: {e}", exc_info=True)
 
 @restricted
+async def clear_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear file cache."""
+    try:
+        global file_cache
+        file_cache = FileCache()
+        await update.message.reply_text("✅ File cache cleared successfully.")
+        logger.info(f"Cache cleared by user {update.effective_user.id}")
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}", exc_info=True)
+
+@restricted
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show bot status."""
     try:
         config = get_config(context)
         hosted_meta = get_hosted_meta(context)
         
+        cache_count = len(file_cache.cache["urls"]) + len(file_cache.cache["files"])
+        
         status_text = (
             f"📊 **Bot Status**\n\n"
             f"Download method: `{config.get('download_method', 'direct')}`\n"
             f"Hosted files: `{len(hosted_meta)}`\n"
-            f"Store time: `{config.get('store_time_days', 2)}` days\n"
+            f"Cached entries: `{cache_count}`\n"
+            f"Storage time: `{format_storage_time(config.get('store_time_hours', 48))}`\n"
             f"Max file size: `{config.get('max_telegram_size_mb', 50)}` MB\n"
             f"Whitelist enabled: `{'Yes' if config.get('whitelist') else 'No'}`\n"
+            f"Caching enabled: `{'Yes' if config.get('enable_cache', True) else 'No'}`\n"
         )
         await update.message.reply_text(status_text, parse_mode='Markdown')
     except Exception as e:
@@ -305,18 +450,20 @@ async def set_host_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def set_store_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set file storage time."""
+    """Set file storage time in hours."""
     try:
         args = context.args
         if not args or not args[0].isdigit():
-            await update.message.reply_text("Usage: `/setstoretime <days>`", parse_mode='Markdown')
+            await update.message.reply_text("Usage: `/setstoretime <hours>`", parse_mode='Markdown')
             return
         
-        days = int(args[0])
+        hours = int(args[0])
         config = get_config(context)
-        config["store_time_days"] = days
+        config["store_time_hours"] = hours
         save_config(config)
-        await update.message.reply_text(f"✅ File storage time set to {days} days.")
+        await update.message.reply_text(
+            f"✅ File storage time set to {format_storage_time(hours)}."
+        )
     except Exception as e:
         logger.error(f"Error setting store time: {e}", exc_info=True)
 
@@ -407,6 +554,35 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         document = update.message.document
         file_id = document.file_id
+        config = get_config(context)
+        
+        # Check cache if enabled
+        if config.get("enable_cache", True):
+            cached = file_cache.get_cached_file(file_id)
+            if cached:
+                logger.info(f"Cache hit for file_id: {file_id}")
+                host_base = config.get("host_base_url", "")
+                
+                if cached.get("hosted_file") and host_base:
+                    link = f"{host_base}/files/{cached['hosted_file']}"
+                    message, keyboard = create_link_message(
+                        link, 
+                        cached.get("password", ""),
+                        config.get("store_time_hours", 48)
+                    )
+                    message = "🔄 **Cached File Found!**\n\n" + message
+                    await update.message.reply_text(
+                        message,
+                        parse_mode='Markdown',
+                        reply_markup=keyboard,
+                        disable_web_page_preview=False
+                    )
+                    return
+                else:
+                    await update.message.reply_text(
+                        "🔄 This file was already processed. Sending again...",
+                        parse_mode='Markdown'
+                    )
         
         # Store file info in user_data
         context.user_data["pending_file"] = {
@@ -416,7 +592,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         }
         
         keyboard = []
-        config = get_config(context)
         host_available = bool(config.get("host_base_url"))
         
         keyboard.append([
@@ -459,11 +634,51 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
+        config = get_config(context)
+        
+        # Check cache for URLs if enabled
+        if config.get("enable_cache", True):
+            cached_results = []
+            for url in urls:
+                cached = file_cache.get_cached_url(url)
+                if cached:
+                    cached_results.append((url, cached))
+            
+            if cached_results:
+                host_base = config.get("host_base_url", "")
+                if host_base:
+                    for url, cached in cached_results:
+                        if cached.get("hosted_file"):
+                            link = f"{host_base}/files/{cached['hosted_file']}"
+                            message, keyboard = create_link_message(
+                                link,
+                                cached.get("password", ""),
+                                config.get("store_time_hours", 48)
+                            )
+                            message = f"🔄 **Cached result for:**\n`{url}`\n\n" + message
+                            await update.message.reply_text(
+                                message,
+                                parse_mode='Markdown',
+                                reply_markup=keyboard,
+                                disable_web_page_preview=False
+                            )
+                        else:
+                            await update.message.reply_text(
+                                f"🔄 Cached result found for: `{url}`\nSending again...",
+                                parse_mode='Markdown'
+                            )
+                    
+                    # If all URLs were cached, return
+                    if len(cached_results) == len(urls):
+                        return
+                    
+                    # Remove cached URLs from pending list
+                    urls = [url for url in urls if url not in [c[0] for c in cached_results]]
+
         context.user_data["pending_urls"] = urls
         logger.info(f"User {update.effective_user.id} sent {len(urls)} URL(s)")
         
         keyboard = []
-        config = get_config(context)
         host_available = bool(config.get("host_base_url"))
         
         if len(urls) > 1:
@@ -511,6 +726,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("pending_urls", None)
             context.user_data.pop("pending_file", None)
             await query.edit_message_text("❌ Operation cancelled.")
+            return
+
+        # Handle copy password callback
+        if data.startswith("copy_pass:"):
+            password = data.split(":", 1)[1]
+            await query.answer(f"Password: {password}", show_alert=True)
             return
 
         # Handle file actions
@@ -573,7 +794,6 @@ async def process_file(update: Update, context, file_info, action, query):
     temp_dir = tempfile.mkdtemp(prefix="file_")
     
     try:
-        # Download the file
         await query.edit_message_text("📥 Downloading file...")
         file = await context.bot.get_file(file_info["file_id"])
         dl_path = os.path.join(temp_dir, file_info["file_name"])
@@ -583,12 +803,22 @@ async def process_file(update: Update, context, file_info, action, query):
             await query.edit_message_text("❌ Failed to download file from server.")
             return
         
+        # Calculate file hash for caching
+        file_hash = file_cache.get_file_hash(dl_path)
+        
         if action == "telegram":
-            # Create 7z and send via Telegram
             await query.edit_message_text("📦 Creating 7z archive...")
             archive_name = f"{uuid4().hex}.7z"
             archive_path = os.path.join(temp_dir, archive_name)
             await create_7z_archive([dl_path], archive_path, password)
+            
+            # Cache the result
+            if config.get("enable_cache", True):
+                file_cache.cache_file(file_info["file_id"], {
+                    "file_hash": file_hash,
+                    "password": password,
+                    "hosted_file": None
+                })
             
             max_vol = max(1, config.get("max_telegram_size_mb", 50) - 1)
             
@@ -645,7 +875,6 @@ async def process_file(update: Update, context, file_info, action, query):
                 )
         
         elif action == "host":
-            # Create 7z and host
             host_base = config.get("host_base_url")
             if not host_base:
                 await query.edit_message_text("❌ Direct link feature not configured.")
@@ -663,24 +892,30 @@ async def process_file(update: Update, context, file_info, action, query):
             meta.append({
                 "filename": archive_name,
                 "created_at": time.time(),
-                "file_size": os.path.getsize(dest)
+                "file_size": os.path.getsize(dest),
+                "file_hash": file_hash
             })
             save_hosted_meta(meta)
             
+            # Cache the result
+            if config.get("enable_cache", True):
+                file_cache.cache_file(file_info["file_id"], {
+                    "file_hash": file_hash,
+                    "password": password,
+                    "hosted_file": archive_name
+                })
+            
             link = f"{host_base}/files/{archive_name}"
-            
-            # Create clickable button for the link
-            keyboard = [[InlineKeyboardButton("🔗 Open Link", url=link)]]
-            
-            message = f"✅ File archived and hosted!\n\n📎 **Direct Link:** [Click Here]({link})"
-            if password:
-                message += "\n🔒 Password protected"
-            message += f"\n⏰ Expires in {config.get('store_time_days', 2)} days"
+            message, keyboard = create_link_message(
+                link, 
+                password, 
+                config.get("store_time_hours", 48)
+            )
             
             await query.edit_message_text(
                 message,
                 parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=keyboard,
                 disable_web_page_preview=False
             )
             
@@ -865,10 +1100,24 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             await query.edit_message_text("❌ Failed to download any file.")
             return
         
+        # Calculate file hashes for caching
+        file_hashes = []
+        for f in files:
+            file_hashes.append(file_cache.get_file_hash(f))
+        
         await query.edit_message_text("📦 Creating 7z archive...")
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await create_7z_archive(files, archive_path, password)
+        
+        # Cache URLs if enabled
+        if config.get("enable_cache", True):
+            for i, url in enumerate(urls):
+                file_cache.cache_url(url, {
+                    "file_hash": file_hashes[i] if i < len(file_hashes) else "",
+                    "password": password,
+                    "hosted_file": None if action == "telegram" else archive_name
+                })
         
         if action == "telegram":
             max_vol = max(1, config.get("max_telegram_size_mb", 50) - 1)
@@ -938,24 +1187,22 @@ async def process_links(update: Update, context, urls, action_type, action, quer
             meta.append({
                 "filename": archive_name,
                 "created_at": time.time(),
-                "file_size": os.path.getsize(dest)
+                "file_size": os.path.getsize(dest),
+                "file_hash": file_hashes[0] if file_hashes else ""
             })
             save_hosted_meta(meta)
             
             link = f"{host_base}/files/{archive_name}"
-            
-            # Create clickable button for the link
-            keyboard = [[InlineKeyboardButton("🔗 Open Link", url=link)]]
-            
-            message = f"✅ **{len(files)}** file(s) archived and hosted!\n\n📎 **Direct Link:** [Click Here]({link})"
-            if password:
-                message += "\n🔒 Password protected"
-            message += f"\n⏰ Expires in {config.get('store_time_days', 2)} days"
+            message, keyboard = create_link_message(
+                link, 
+                password, 
+                config.get("store_time_hours", 48)
+            )
             
             await query.edit_message_text(
                 message,
                 parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=keyboard,
                 disable_web_page_preview=False
             )
             
@@ -975,36 +1222,40 @@ async def process_links(update: Update, context, urls, action_type, action, quer
 # Cleanup Job
 # ----------------------------------------------------------------------
 async def cleanup_loop(application: Application):
-    """Periodically delete expired hosted files."""
+    """Periodically delete expired hosted files and clean cache."""
     while True:
         try:
             await asyncio.sleep(3600)
             
             config = application.bot_data.get("config", {})
             meta = application.bot_data.get("hosted_meta", [])
+            storage_hours = config.get("store_time_hours", 48)
             
-            if not meta:
-                continue
+            # Clean hosted files
+            if meta:
+                store_seconds = storage_hours * 3600
+                now = time.time()
+                new_meta = []
+                deleted = 0
+                
+                for entry in meta:
+                    if now - entry["created_at"] > store_seconds:
+                        filepath = os.path.join(HOSTED_FILES_DIR, entry["filename"])
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                            logger.info(f"Deleted expired file: {entry['filename']}")
+                            deleted += 1
+                    else:
+                        new_meta.append(entry)
+                
+                if deleted > 0:
+                    application.bot_data["hosted_meta"] = new_meta
+                    save_hosted_meta(new_meta)
+                    logger.info(f"Cleanup: removed {deleted} expired file(s)")
             
-            store_seconds = config.get("store_time_days", 2) * 86400
-            now = time.time()
-            new_meta = []
-            deleted = 0
-            
-            for entry in meta:
-                if now - entry["created_at"] > store_seconds:
-                    filepath = os.path.join(HOSTED_FILES_DIR, entry["filename"])
-                    if os.path.exists(filepath):
-                        os.remove(filepath)
-                        logger.info(f"Deleted expired file: {entry['filename']}")
-                        deleted += 1
-                else:
-                    new_meta.append(entry)
-            
-            if deleted > 0:
-                application.bot_data["hosted_meta"] = new_meta
-                save_hosted_meta(new_meta)
-                logger.info(f"Cleanup: removed {deleted} expired file(s)")
+            # Clean cache
+            if config.get("enable_cache", True):
+                file_cache._clean_expired(storage_hours)
                 
         except Exception as e:
             logger.error(f"Cleanup error: {e}", exc_info=True)
@@ -1074,6 +1325,11 @@ async def main():
                 logger.warning("Token missing in config, re-creating...")
                 config = create_config()
         
+        # Migrate from store_time_days to store_time_hours if needed
+        if "store_time_days" in config and "store_time_hours" not in config:
+            config["store_time_hours"] = config["store_time_days"] * 24
+            del config["store_time_days"]
+        
         for k, v in DEFAULT_CONFIG.items():
             config.setdefault(k, v)
         
@@ -1114,6 +1370,7 @@ async def main():
         application.add_handler(CommandHandler("setpassword", set_password))
         application.add_handler(CommandHandler("mypassword", my_password))
         application.add_handler(CommandHandler("status", status))
+        application.add_handler(CommandHandler("clearcache", clear_cache))
         application.add_handler(CommandHandler("sethosturl", set_host_url))
         application.add_handler(CommandHandler("setstoretime", set_store_time))
         application.add_handler(CommandHandler("whitelist_add", whitelist_add))
