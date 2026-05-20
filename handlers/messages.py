@@ -6,6 +6,9 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+# Telegram Bot API limits
+TELEGRAM_UPLOAD_LIMIT = 20 * 1024 * 1024  # 20 MB - Telegram's file upload limit to bots
+
 @restricted
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle received files."""
@@ -14,6 +17,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         file_size = document.file_size or 0
         file_size_mb = file_size / (1024 * 1024)
+        
+        # Check if file exceeds Telegram's upload limit to bots
+        if file_size > TELEGRAM_UPLOAD_LIMIT:
+            await update.message.reply_text(
+                f"⚠️ **File Too Large**\n\n"
+                f"📁 File: `{document.file_name}`\n"
+                f"📏 Size: `{format_file_size(file_size)}`\n\n"
+                f"❌ Telegram bots cannot process files larger than **20 MB**.\n\n"
+                f"**Solutions:**\n"
+                f"1. Upload your file to a hosting service and send me the **link**\n"
+                f"2. Use a file sharing service (Google Drive, Dropbox, etc.)\n"
+                f"3. Compress the file before sending\n\n"
+                f"I can download files of ANY size from links!",
+                parse_mode='Markdown'
+            )
+            return
         
         context.user_data["pending_file"] = {
             "file_id": document.file_id,
@@ -28,25 +47,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if config.is_host_enabled:
             keyboard.append([
-                InlineKeyboardButton("🔗 Get Direct Link (No Size Limit)", callback_data="file:host")
+                InlineKeyboardButton("🔗 Get Direct Link", callback_data="file:host")
             ])
         
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="file:cancel")])
         
-        # Show size warning for Telegram option
-        warning = ""
-        if file_size_mb > 50:
-            warning = (
-                "\n⚠️ **Large File Detected**\n"
-                "• Telegram: Will be automatically split\n"
-                "• Direct Link: No size limit\n"
-            )
-        
         await update.message.reply_text(
             f"📁 **File Received**\n\n"
             f"• Name: `{document.file_name}`\n"
-            f"• Size: `{format_file_size(file_size)}`\n"
-            f"{warning}\n"
+            f"• Size: `{format_file_size(file_size)}`\n\n"
             "Choose action:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
@@ -65,7 +74,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not urls:
             await update.message.reply_text(
                 "❌ No links found.\n"
-                "Send HTTP/HTTPS links to download."
+                "Send HTTP/HTTPS links to download.\n\n"
+                "💡 **Tip:** I can download files of ANY size from links!"
             )
             return
         
@@ -94,7 +104,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
         
         message = f"📎 Found **{len(urls)}** link(s)\n\n"
-        message += "• **Telegram**: Auto-split if too large\n"
+        message += "• **Telegram**: Auto-split into parts\n"
         message += "• **Direct Link**: No size restrictions\n\n"
         message += "Select action:"
         

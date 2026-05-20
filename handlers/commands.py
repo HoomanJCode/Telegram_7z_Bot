@@ -16,17 +16,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 **FileBot - Download Manager**\n\n"
         "**Features:**\n"
-        "• Send links → Download & pack to 7z\n"
-        "• Send files → Archive & host\n"
+        "• Send links → Download & pack to 7z (ANY size)\n"
+        "• Send files (<20MB) → Archive & host\n"
         "• Multiple links → Batch to single 7z\n\n"
+        "**Telegram Limits:**\n"
+        "• File upload to bot: Max **20 MB**\n"
+        "• Download from links: **Unlimited**\n\n"
         "**Commands:**\n"
         "/setpassword - Set archive password\n"
         "/mypassword - Check password status\n"
         "/status - Bot statistics\n\n"
-        "Send a link or file to begin!",
+        "💡 **Tip:** For large files, send me a download link!",
         parse_mode='Markdown'
     )
-
+    
 @restricted
 async def set_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set 7z password for user."""

@@ -19,7 +19,8 @@ file_manager = FileManager()
 archiver = SevenZipArchiver()
 
 # Telegram Bot API limits
-TELEGRAM_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB for bots
+TELEGRAM_MAX_DOWNLOAD = 20 * 1024 * 1024  # 20 MB - Bot can receive
+TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024    # 50 MB - Bot can send
 
 @restricted
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,26 +53,19 @@ async def _handle_file_callback(update, context, query, data):
         await query.edit_message_text("⏰ Session expired.")
         return
     
-    # For hosting, no size limit - proceed directly
-    if action == "host":
-        await query.edit_message_text("⏳ Processing file for hosting...")
-        asyncio.create_task(_process_file(update, context, file_info, action, query))
+    # Additional size check before processing
+    if file_info.get("file_size", 0) > TELEGRAM_MAX_DOWNLOAD:
+        await query.edit_message_text(
+            f"⚠️ **File Too Large**\n\n"
+            f"Telegram bots cannot process files >20 MB sent directly.\n\n"
+            f"**Solution:** Upload your file somewhere and send me the **download link**.\n"
+            f"I can handle files of ANY size from URLs!",
+            parse_mode='Markdown'
+        )
         return
     
-    # For Telegram sending, warn about large files but still process
-    if action == "telegram":
-        file_size_mb = file_info["file_size"] / (1024 * 1024) if file_info.get("file_size") else 0
-        if file_size_mb > 50:
-            await query.edit_message_text(
-                f"⚠️ File is {file_size_mb:.1f} MB\n"
-                f"Will be automatically split into parts.\n\n"
-                "⏳ Processing...",
-                parse_mode='Markdown'
-            )
-        else:
-            await query.edit_message_text("⏳ Processing file...")
-        
-        asyncio.create_task(_process_file(update, context, file_info, action, query))
+    await query.edit_message_text("⏳ Processing file...")
+    asyncio.create_task(_process_file(update, context, file_info, action, query))
 
 async def _handle_url_callback(update, context, query, data):
     """Handle URL action callbacks."""
@@ -86,14 +80,14 @@ async def _handle_url_callback(update, context, query, data):
     asyncio.create_task(_process_urls(update, context, urls, action, query))
 
 async def _process_file(update, context, file_info, action, query):
-    """Process uploaded file."""
+    """Process uploaded file (under 20MB)."""
     config = context.application.bot_data["config"]
     passwords = context.application.bot_data["passwords"]
     password = passwords.get(str(update.effective_user.id), "")
     temp_dir = tempfile.mkdtemp(prefix="filebot_")
     
     try:
-        # Download file
+        # Download file from Telegram (already validated <20MB)
         await query.edit_message_text("📥 Downloading file...")
         file = await context.bot.get_file(file_info["file_id"])
         dl_path = os.path.join(temp_dir, file_info["file_name"])
@@ -104,33 +98,34 @@ async def _process_file(update, context, file_info, action, query):
             return
         
         file_size = os.path.getsize(dl_path)
-        file_size_mb = file_size / (1024 * 1024)
         
         if action == "telegram":
-            # Check if file needs splitting
-            if file_size > TELEGRAM_MAX_FILE_SIZE:
+            # Create 7z archive and send via Telegram
+            await query.edit_message_text("📦 Creating 7z archive...")
+            archive_name = f"{uuid4().hex}.7z"
+            archive_path = os.path.join(temp_dir, archive_name)
+            await archiver.create_archive([dl_path], archive_path, password)
+            
+            archive_size = os.path.getsize(archive_path)
+            
+            # Check if archive exceeds Telegram upload limit
+            if archive_size > TELEGRAM_MAX_UPLOAD:
                 await query.edit_message_text(
-                    f"📦 File is {file_size_mb:.1f} MB\n"
-                    "Creating split archive for Telegram..."
+                    f"📦 Splitting archive ({format_file_size(archive_size)})..."
                 )
                 
-                # Create 7z archive first (no split)
-                archive_name = f"{uuid4().hex}.7z"
-                archive_path = os.path.join(temp_dir, archive_name)
-                await archiver.create_archive([dl_path], archive_path, password)
-                
-                # Split the archive
-                split_volumes = await archiver.create_split_archive(
+                volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),
                     password,
-                    config.max_telegram_size_mb - 1  # Leave 1MB margin
+                    config.max_telegram_size_mb - 1
                 )
                 
-                # Send all parts
-                total = len(split_volumes)
-                for i, vol in enumerate(split_volumes, 1):
-                    caption = f"📦 {file_info['file_name']} - Part {i}/{total}"
+                total = len(volumes)
+                await query.edit_message_text(f"📤 Uploading {total} parts...")
+                
+                for i, vol in enumerate(volumes, 1):
+                    caption = f"📦 {file_info['file_name']}\nPart {i}/{total}"
                     if password:
                         caption += "\n🔒 Password protected"
                     
@@ -143,20 +138,17 @@ async def _process_file(update, context, file_info, action, query):
                             read_timeout=120,
                             write_timeout=120
                         )
+                    
+                    if i < total:
+                        await asyncio.sleep(1)
                 
                 await query.edit_message_text(
                     f"✅ File sent in {total} parts\n"
-                    f"📦 Original: {file_info['file_name']}\n"
-                    f"📏 Size: {file_size_mb:.1f} MB" +
+                    f"📏 Size: {format_file_size(archive_size)}" +
                     ("\n🔒 Password protected" if password else "")
                 )
             else:
-                # File fits in one part
-                await query.edit_message_text("📦 Creating 7z archive...")
-                archive_name = f"{uuid4().hex}.7z"
-                archive_path = os.path.join(temp_dir, archive_name)
-                await archiver.create_archive([dl_path], archive_path, password)
-                
+                # Single file upload
                 caption = f"📦 {file_info['file_name']}"
                 if password:
                     caption += "\n🔒 Password protected"
@@ -173,12 +165,12 @@ async def _process_file(update, context, file_info, action, query):
                 
                 await query.edit_message_text(
                     f"✅ File sent successfully\n"
-                    f"📏 Size: {file_size_mb:.1f} MB" +
+                    f"📏 Size: {format_file_size(archive_size)}" +
                     ("\n🔒 Password protected" if password else "")
                 )
         
         elif action == "host":
-            # Hosting - no size limit
+            # Host the file - no upload limits for hosting
             await query.edit_message_text("📦 Creating 7z archive for hosting...")
             
             archive_name = f"{uuid4().hex}.7z"
@@ -187,7 +179,7 @@ async def _process_file(update, context, file_info, action, query):
             
             archive_size = os.path.getsize(archive_path)
             
-            dest = file_manager.host_file(archive_path, archive_name)
+            file_manager.host_file(archive_path, archive_name)
             file_manager.add_file_record(archive_name, archive_size)
             
             link = f"{config.host_base_url}/files/{archive_name}"
@@ -195,18 +187,16 @@ async def _process_file(update, context, file_info, action, query):
             message = (
                 f"✅ **File Hosted Successfully**\n\n"
                 f"📁 Original: `{file_info['file_name']}`\n"
-                f"📦 Archive: `{archive_name}`\n"
                 f"📏 Size: `{format_file_size(archive_size)}`\n\n"
                 f"📎 **Direct Link:**\n`{link}`\n"
                 f"🔗 [Click to Open]({link})\n"
             )
             if password:
-                message += "🔒 Password protected\n"
-            message += f"⏰ Expires: {format_time(config.store_time_hours * 3600)}"
+                message += "\n🔒 Password protected"
+            message += f"\n⏰ Expires: {format_time(config.store_time_hours * 3600)}"
             
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Open Link", url=link)],
-                [InlineKeyboardButton("📋 Copy Link", callback_data=f"copy:{link}")]
+                [InlineKeyboardButton("🔗 Open Link", url=link)]
             ])
             
             await query.edit_message_text(
@@ -223,14 +213,14 @@ async def _process_file(update, context, file_info, action, query):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 async def _process_urls(update, context, urls, action, query):
-    """Process URLs."""
+    """Process URLs - NO size limits for downloads."""
     config = context.application.bot_data["config"]
     passwords = context.application.bot_data["passwords"]
     password = passwords.get(str(update.effective_user.id), "")
     temp_dir = tempfile.mkdtemp(prefix="filebot_")
     
     try:
-        # Download
+        # Download files from URLs (any size)
         await query.edit_message_text("📥 Downloading files...")
         downloader = DownloadManager(config.download_method)
         files = await downloader.download(urls, temp_dir)
@@ -239,12 +229,12 @@ async def _process_urls(update, context, urls, action, query):
             await query.edit_message_text("❌ No files downloaded.")
             return
         
-        # Calculate total size
         total_size = sum(os.path.getsize(f) for f in files)
-        total_size_mb = total_size / (1024 * 1024)
         
         # Create archive
-        await query.edit_message_text(f"📦 Creating archive ({total_size_mb:.1f} MB)...")
+        await query.edit_message_text(
+            f"📦 Creating archive ({format_file_size(total_size)})..."
+        )
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await archiver.create_archive(files, archive_path, password)
@@ -252,22 +242,23 @@ async def _process_urls(update, context, urls, action, query):
         archive_size = os.path.getsize(archive_path)
         
         if action == "telegram":
-            # Check if archive needs splitting
-            if archive_size > TELEGRAM_MAX_FILE_SIZE:
+            # Check if needs splitting for Telegram
+            if archive_size > TELEGRAM_MAX_UPLOAD:
                 await query.edit_message_text(
-                    f"📦 Archive is {archive_size/(1024*1024):.1f} MB\n"
-                    "Splitting for Telegram..."
+                    f"📦 Splitting archive ({format_file_size(archive_size)})..."
                 )
                 
-                split_volumes = await archiver.create_split_archive(
+                volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),
                     password,
                     config.max_telegram_size_mb - 1
                 )
                 
-                total = len(split_volumes)
-                for i, vol in enumerate(split_volumes, 1):
+                total = len(volumes)
+                await query.edit_message_text(f"📤 Uploading {total} parts...")
+                
+                for i, vol in enumerate(volumes, 1):
                     caption = f"📦 Archive Part {i}/{total}"
                     if password:
                         caption += "\n🔒 Password protected"
@@ -281,9 +272,13 @@ async def _process_urls(update, context, urls, action, query):
                             read_timeout=120,
                             write_timeout=120
                         )
+                    
+                    if i < total:
+                        await asyncio.sleep(1)
                 
                 await query.edit_message_text(
                     f"✅ Archive sent in {total} parts\n"
+                    f"📁 {len(files)} file(s)\n"
                     f"📏 Total: {format_file_size(archive_size)}" +
                     ("\n🔒 Password protected" if password else "")
                 )
@@ -309,8 +304,8 @@ async def _process_urls(update, context, urls, action, query):
                 )
         
         elif action == "host":
-            # Hosting - no size limit
-            dest = file_manager.host_file(archive_path, archive_name)
+            # Hosting - NO size limit
+            file_manager.host_file(archive_path, archive_name)
             file_manager.add_file_record(archive_name, archive_size)
             
             link = f"{config.host_base_url}/files/{archive_name}"
@@ -318,14 +313,13 @@ async def _process_urls(update, context, urls, action, query):
             message = (
                 f"✅ **Files Hosted Successfully**\n\n"
                 f"📁 Files: `{len(files)}`\n"
-                f"📦 Archive: `{archive_name}`\n"
                 f"📏 Size: `{format_file_size(archive_size)}`\n\n"
                 f"📎 **Direct Link:**\n`{link}`\n"
                 f"🔗 [Click to Open]({link})\n"
             )
             if password:
-                message += "🔒 Password protected\n"
-            message += f"⏰ Expires: {format_time(config.store_time_hours * 3600)}"
+                message += "\n🔒 Password protected"
+            message += f"\n⏰ Expires: {format_time(config.store_time_hours * 3600)}"
             
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔗 Open Link", url=link)]
@@ -357,7 +351,10 @@ async def _download_telegram_file(file, dest_path: str) -> bool:
             url = f"{base_url}/bot{bot.token}/{file.file_path}"
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=600)) as resp:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=600)
+                ) as resp:
                     if resp.status == 200:
                         with open(dest_path, "wb") as f:
                             async for chunk in resp.content.iter_chunked(8192):
