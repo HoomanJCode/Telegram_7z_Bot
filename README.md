@@ -446,6 +446,6 @@ This project serves as an example of effective human-AI collaboration in softwar
 
 **[⬆ Back to Top](#Telegram_7z_Bot---telegram-download-manager)**
 
-Made with ❤️ by [Your Name] | Powered by DeepSeek AI
+Made with ❤️ by HoomanJCode | Powered by DeepSeek AI
 
 </div>
