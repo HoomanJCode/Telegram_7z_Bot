@@ -1,365 +1,223 @@
-import asyncio
-import os
-import tempfile
-import shutil
-from uuid import uuid4
-from pathlib import Path
-import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from core.decorators import restricted
-from core.downloader import DownloadManager
-from core.archiver import SevenZipArchiver
+from core.decorators import restricted, admin_only
 from core.file_manager import FileManager
 from utils.logger import setup_logger
-from utils.helpers import format_time, format_file_size
+from utils.helpers import format_time, mask_string, format_file_size
 
 logger = setup_logger(__name__)
 file_manager = FileManager()
-archiver = SevenZipArchiver()
 
-# Telegram Bot API limits
-TELEGRAM_MAX_DOWNLOAD = 20 * 1024 * 1024  # 20 MB - Bot can receive
-TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024    # 50 MB - Bot can send
+def get_settings(context: ContextTypes.DEFAULT_TYPE):
+    """Get settings from bot_data (supports both 'settings' and 'config' keys)."""
+    # Try settings first, then config for backward compatibility
+    settings = context.application.bot_data.get("settings")
+    if settings is None:
+        settings = context.application.bot_data.get("config")
+    return settings
 
 @restricted
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all callback queries."""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message with menu."""
+    settings = get_settings(context)
     
-    if data == "cancel":
-        context.user_data.clear()
-        await query.edit_message_text("❌ Cancelled.")
-        return
+    keyboard = [
+        [InlineKeyboardButton("📁 Recent Files", callback_data="menu:recent")],
+        [InlineKeyboardButton("📊 Bot Status", callback_data="menu:status")],
+        [InlineKeyboardButton("🔒 My Password", callback_data="menu:password")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")]
+    ]
     
-    if data.startswith("file:"):
-        await _handle_file_callback(update, context, query, data)
-    else:
-        await _handle_url_callback(update, context, query, data)
+    await update.message.reply_text(
+        "🤖 **FileBot - Download Manager**\n\n"
+        "**Features:**\n"
+        "• Send links → Download & pack to 7z (ANY size)\n"
+        "• Send files (<20MB) → Archive & host\n"
+        "• Multiple links → Batch to single 7z\n\n"
+        "**Telegram Limits:**\n"
+        "• File upload to bot: Max **20 MB**\n"
+        "• Download from links: **Unlimited**\n\n"
+        "Use menu below or send me a link/file!",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-async def _handle_file_callback(update, context, query, data):
-    """Handle file action callbacks."""
-    _, action = data.split(":", 1)
+@restricted
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help command."""
+    await start(update, context)
+
+@restricted
+async def set_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set 7z password for user."""
+    user_id = str(update.effective_user.id)
+    args = context.args
     
-    if action == "cancel":
-        context.user_data.pop("pending_file", None)
-        await query.edit_message_text("❌ Cancelled.")
-        return
-    
-    file_info = context.user_data.pop("pending_file", None)
-    if not file_info:
-        await query.edit_message_text("⏰ Session expired.")
-        return
-    
-    # Additional size check before processing
-    if file_info.get("file_size", 0) > TELEGRAM_MAX_DOWNLOAD:
-        await query.edit_message_text(
-            f"⚠️ **File Too Large**\n\n"
-            f"Telegram bots cannot process files >20 MB sent directly.\n\n"
-            f"**Solution:** Upload your file somewhere and send me the **download link**.\n"
-            f"I can handle files of ANY size from URLs!",
+    if not args:
+        await update.message.reply_text(
+            "Usage: `/setpassword <password>`\n\n"
+            "⚠️ Send this in **private chat** for security.",
             parse_mode='Markdown'
         )
         return
     
-    await query.edit_message_text("⏳ Processing file...")
-    asyncio.create_task(_process_file(update, context, file_info, action, query))
-
-async def _handle_url_callback(update, context, query, data):
-    """Handle URL action callbacks."""
-    action_type, action = data.split(":", 1)
+    password = " ".join(args)
+    passwords = context.application.bot_data["passwords"]
+    passwords[user_id] = password
     
-    urls = context.user_data.pop("pending_urls", None)
-    if not urls:
-        await query.edit_message_text("⏰ Session expired.")
+    import json
+    from pathlib import Path
+    DATA_DIR = Path("data")
+    DATA_DIR.mkdir(exist_ok=True)
+    with open(DATA_DIR / "passwords.json", "w") as f:
+        json.dump(passwords, f, indent=2)
+    
+    await update.message.reply_text(
+        f"✅ Password saved!\n"
+        f"Password: `{mask_string(password)}`",
+        parse_mode='Markdown'
+    )
+
+@restricted
+async def my_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show password status."""
+    user_id = str(update.effective_user.id)
+    passwords = context.application.bot_data["passwords"]
+    
+    if user_id in passwords:
+        await update.message.reply_text(
+            f"✅ Password is set: `{mask_string(passwords[user_id])}`",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text("❌ No password set. Use /setpassword")
+
+@restricted
+async def bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show bot status."""
+    settings = get_settings(context)
+    metadata = file_manager.load_metadata()
+    
+    if settings is None:
+        await update.message.reply_text("❌ Bot configuration not loaded. Please restart the bot.")
         return
     
-    await query.edit_message_text(f"⏳ Processing {len(urls)} link(s)...")
-    asyncio.create_task(_process_urls(update, context, urls, action, query))
-
-async def _process_file(update, context, file_info, action, query):
-    """Process uploaded file (under 20MB)."""
-    config = context.application.bot_data["config"]
-    passwords = context.application.bot_data["passwords"]
-    password = passwords.get(str(update.effective_user.id), "")
-    temp_dir = tempfile.mkdtemp(prefix="filebot_")
+    store_time = format_time(settings.store_time_hours * 3600)
     
-    try:
-        # Download file from Telegram (already validated <20MB)
-        await query.edit_message_text("📥 Downloading file...")
-        file = await context.bot.get_file(file_info["file_id"])
-        dl_path = os.path.join(temp_dir, file_info["file_name"])
-        
-        success = await _download_telegram_file(file, dl_path)
-        if not success:
-            await query.edit_message_text("❌ Failed to download file.")
-            return
-        
-        file_size = os.path.getsize(dl_path)
-        
-        if action == "telegram":
-            # Create 7z archive and send via Telegram
-            await query.edit_message_text("📦 Creating 7z archive...")
-            archive_name = f"{uuid4().hex}.7z"
-            archive_path = os.path.join(temp_dir, archive_name)
-            await archiver.create_archive([dl_path], archive_path, password)
-            
-            archive_size = os.path.getsize(archive_path)
-            
-            # Check if archive exceeds Telegram upload limit
-            if archive_size > TELEGRAM_MAX_UPLOAD:
-                await query.edit_message_text(
-                    f"📦 Splitting archive ({format_file_size(archive_size)})..."
-                )
-                
-                volumes = await archiver.create_split_archive(
-                    [archive_path],
-                    os.path.join(temp_dir, "part.7z"),
-                    password,
-                    config.max_telegram_size_mb - 1
-                )
-                
-                total = len(volumes)
-                await query.edit_message_text(f"📤 Uploading {total} parts...")
-                
-                for i, vol in enumerate(volumes, 1):
-                    caption = f"📦 {file_info['file_name']}\nPart {i}/{total}"
-                    if password:
-                        caption += "\n🔒 Password protected"
-                    
-                    with open(vol, "rb") as f:
-                        await context.bot.send_document(
-                            chat_id=query.message.chat_id,
-                            document=f,
-                            filename=vol.name,
-                            caption=caption,
-                            read_timeout=120,
-                            write_timeout=120
-                        )
-                    
-                    if i < total:
-                        await asyncio.sleep(1)
-                
-                await query.edit_message_text(
-                    f"✅ File sent in {total} parts\n"
-                    f"📏 Size: {format_file_size(archive_size)}" +
-                    ("\n🔒 Password protected" if password else "")
-                )
-            else:
-                # Single file upload
-                caption = f"📦 {file_info['file_name']}"
-                if password:
-                    caption += "\n🔒 Password protected"
-                
-                with open(archive_path, "rb") as f:
-                    await context.bot.send_document(
-                        chat_id=query.message.chat_id,
-                        document=f,
-                        filename=archive_name,
-                        caption=caption,
-                        read_timeout=120,
-                        write_timeout=120
-                    )
-                
-                await query.edit_message_text(
-                    f"✅ File sent successfully\n"
-                    f"📏 Size: {format_file_size(archive_size)}" +
-                    ("\n🔒 Password protected" if password else "")
-                )
-        
-        elif action == "host":
-            # Host the file - no upload limits for hosting
-            await query.edit_message_text("📦 Creating 7z archive for hosting...")
-            
-            archive_name = f"{uuid4().hex}.7z"
-            archive_path = os.path.join(temp_dir, archive_name)
-            await archiver.create_archive([dl_path], archive_path, password)
-            
-            archive_size = os.path.getsize(archive_path)
-            
-            file_manager.host_file(archive_path, archive_name)
-            file_manager.add_file_record(archive_name, archive_size)
-            
-            link = f"{config.host_base_url}/files/{archive_name}"
-            
-            message = (
-                f"✅ **File Hosted Successfully**\n\n"
-                f"📁 Original: `{file_info['file_name']}`\n"
-                f"📏 Size: `{format_file_size(archive_size)}`\n\n"
-                f"📎 **Direct Link:**\n`{link}`\n"
-                f"🔗 [Click to Open]({link})\n"
-            )
-            if password:
-                message += "\n🔒 Password protected"
-            message += f"\n⏰ Expires: {format_time(config.store_time_hours * 3600)}"
-            
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Open Link", url=link)]
-            ])
-            
-            await query.edit_message_text(
-                message,
-                parse_mode='Markdown',
-                reply_markup=keyboard,
-                disable_web_page_preview=False
-            )
-            
-    except Exception as e:
-        logger.error(f"File processing error: {e}", exc_info=True)
-        await query.edit_message_text(f"❌ Processing failed: {str(e)[:200]}")
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-async def _process_urls(update, context, urls, action, query):
-    """Process URLs - NO size limits for downloads."""
-    config = context.application.bot_data["config"]
-    passwords = context.application.bot_data["passwords"]
-    password = passwords.get(str(update.effective_user.id), "")
-    temp_dir = tempfile.mkdtemp(prefix="filebot_")
+    status = (
+        f"📊 **Bot Status**\n\n"
+        f"• Download: `{settings.download_method}`\n"
+        f"• Hosted files: `{len(metadata)}`\n"
+        f"• Storage time: `{store_time}`\n"
+        f"• Max file: `{settings.max_telegram_size_mb} MB`\n"
+        f"• Whitelist: `{'On' if settings.is_whitelist_enabled else 'Off'}`\n"
+        f"• Hosting: `{'Active' if settings.is_host_enabled else 'Inactive'}`\n"
+        f"• Host URL: `{settings.host_base_url or 'Not set'}`"
+    )
     
-    try:
-        # Download files from URLs (any size)
-        await query.edit_message_text("📥 Downloading files...")
-        downloader = DownloadManager(config.download_method)
-        files = await downloader.download(urls, temp_dir)
+    await update.message.reply_text(status, parse_mode='Markdown')
+
+@restricted
+async def recent_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show recent hosted files."""
+    settings = get_settings(context)
+    metadata = file_manager.load_metadata()
+    
+    if not metadata:
+        await update.message.reply_text("📁 No hosted files found.")
+        return
+    
+    recent = sorted(metadata, key=lambda x: x.get("created_at", 0), reverse=True)[:20]
+    
+    if not recent:
+        await update.message.reply_text("📁 No recent files.")
+        return
+    
+    message = "📁 **Recent Hosted Files**\n\n"
+    keyboard = []
+    
+    import time
+    for i, entry in enumerate(recent):
+        filename = entry.get("filename", "Unknown")
+        file_size = entry.get("file_size", 0)
+        created_at = entry.get("created_at", 0)
+        original_name = entry.get("original_name", filename)
         
-        if not files:
-            await query.edit_message_text("❌ No files downloaded.")
-            return
+        time_ago = format_time(int(time.time() - created_at))
         
-        total_size = sum(os.path.getsize(f) for f in files)
-        
-        # Create archive
-        await query.edit_message_text(
-            f"📦 Creating archive ({format_file_size(total_size)})..."
+        message += (
+            f"**{i+1}.** `{original_name}`\n"
+            f"   📏 `{format_file_size(file_size)}` • ⏰ `{time_ago} ago`\n\n"
         )
-        archive_name = f"{uuid4().hex}.7z"
-        archive_path = os.path.join(temp_dir, archive_name)
-        await archiver.create_archive(files, archive_path, password)
         
-        archive_size = os.path.getsize(archive_path)
-        
-        if action == "telegram":
-            # Check if needs splitting for Telegram
-            if archive_size > TELEGRAM_MAX_UPLOAD:
-                await query.edit_message_text(
-                    f"📦 Splitting archive ({format_file_size(archive_size)})..."
-                )
-                
-                volumes = await archiver.create_split_archive(
-                    [archive_path],
-                    os.path.join(temp_dir, "part.7z"),
-                    password,
-                    config.max_telegram_size_mb - 1
-                )
-                
-                total = len(volumes)
-                await query.edit_message_text(f"📤 Uploading {total} parts...")
-                
-                for i, vol in enumerate(volumes, 1):
-                    caption = f"📦 Archive Part {i}/{total}"
-                    if password:
-                        caption += "\n🔒 Password protected"
-                    
-                    with open(vol, "rb") as f:
-                        await context.bot.send_document(
-                            chat_id=query.message.chat_id,
-                            document=f,
-                            filename=vol.name,
-                            caption=caption,
-                            read_timeout=120,
-                            write_timeout=120
-                        )
-                    
-                    if i < total:
-                        await asyncio.sleep(1)
-                
-                await query.edit_message_text(
-                    f"✅ Archive sent in {total} parts\n"
-                    f"📁 {len(files)} file(s)\n"
-                    f"📏 Total: {format_file_size(archive_size)}" +
-                    ("\n🔒 Password protected" if password else "")
-                )
-            else:
-                caption = f"📦 Archive ({len(files)} files)"
-                if password:
-                    caption += "\n🔒 Password protected"
-                
-                with open(archive_path, "rb") as f:
-                    await context.bot.send_document(
-                        chat_id=query.message.chat_id,
-                        document=f,
-                        filename=archive_name,
-                        caption=caption,
-                        read_timeout=120,
-                        write_timeout=120
-                    )
-                
-                await query.edit_message_text(
-                    f"✅ Archive sent\n"
-                    f"📏 Size: {format_file_size(archive_size)}" +
-                    ("\n🔒 Password protected" if password else "")
-                )
-        
-        elif action == "host":
-            # Hosting - NO size limit
-            file_manager.host_file(archive_path, archive_name)
-            file_manager.add_file_record(archive_name, archive_size)
-            
-            link = f"{config.host_base_url}/files/{archive_name}"
-            
-            message = (
-                f"✅ **Files Hosted Successfully**\n\n"
-                f"📁 Files: `{len(files)}`\n"
-                f"📏 Size: `{format_file_size(archive_size)}`\n\n"
-                f"📎 **Direct Link:**\n`{link}`\n"
-                f"🔗 [Click to Open]({link})\n"
-            )
-            if password:
-                message += "\n🔒 Password protected"
-            message += f"\n⏰ Expires: {format_time(config.store_time_hours * 3600)}"
-            
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Open Link", url=link)]
+        if settings and settings.is_host_enabled:
+            link = f"{settings.host_base_url}/files/{filename}"
+            keyboard.append([
+                InlineKeyboardButton(f"📎 {original_name[:30]}", url=link)
             ])
-            
-            await query.edit_message_text(
-                message,
-                parse_mode='Markdown',
-                reply_markup=keyboard,
-                disable_web_page_preview=False
-            )
-            
-    except Exception as e:
-        logger.error(f"URL processing error: {e}", exc_info=True)
-        await query.edit_message_text(f"❌ Processing failed: {str(e)[:200]}")
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    
+    if keyboard:
+        await update.message.reply_text(
+            message,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard[:10]),
+            disable_web_page_preview=True
+        )
+    else:
+        await update.message.reply_text(message, parse_mode='Markdown')
 
-async def _download_telegram_file(file, dest_path: str) -> bool:
-    """Download file from Telegram with fallback."""
-    try:
-        await file.download_to_drive(dest_path)
-        return True
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-        try:
-            bot = file.get_bot()
-            base_url = getattr(bot, 'base_file_url', "https://api.telegram.org/file")
-            url = f"{base_url}/bot{bot.token}/{file.file_path}"
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=600)
-                ) as resp:
-                    if resp.status == 200:
-                        with open(dest_path, "wb") as f:
-                            async for chunk in resp.content.iter_chunked(8192):
-                                f.write(chunk)
-                        return True
-        except Exception as e2:
-            logger.error(f"Fallback failed: {e2}")
-        return False
+@admin_only
+async def set_host_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set hosting URL."""
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: `/sethosturl <url>`", parse_mode='Markdown')
+        return
+    
+    settings = get_settings(context)
+    url = args[0].rstrip("/")
+    settings.update_host_url(url)
+    await update.message.reply_text(f"✅ Host URL updated to: `{url}`", parse_mode='Markdown')
+
+@admin_only
+async def set_store_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set file storage time."""
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: `/setstoretime <hours>`", parse_mode='Markdown')
+        return
+    
+    hours = int(args[0])
+    if hours < 1:
+        await update.message.reply_text("❌ Minimum 1 hour required.")
+        return
+    
+    settings = get_settings(context)
+    settings.update_store_time(hours)
+    await update.message.reply_text(f"✅ Storage time: {format_time(hours * 3600)}")
+
+@admin_only
+async def whitelist_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add user to whitelist."""
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: `/wladd <user_id>`", parse_mode='Markdown')
+        return
+    
+    settings = get_settings(context)
+    user_id = int(args[0])
+    settings.add_to_whitelist(user_id)
+    await update.message.reply_text(f"✅ User `{user_id}` added to whitelist.", parse_mode='Markdown')
+
+@admin_only
+async def whitelist_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove user from whitelist."""
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: `/wlremove <user_id>`", parse_mode='Markdown')
+        return
+    
+    settings = get_settings(context)
+    user_id = int(args[0])
+    settings.remove_from_whitelist(user_id)
+    await update.message.reply_text(f"✅ User `{user_id}` removed from whitelist.", parse_mode='Markdown')
