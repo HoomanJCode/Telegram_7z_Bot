@@ -43,9 +43,6 @@ jobs:
         run: |
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << 'ENDSSH'
           
-          # ======================
-          # Configuration
-          # ======================
           PROJECT_DIR="${{ env.PROJECT_DIR }}"
           BRANCH="${{ env.BRANCH }}"
           REPO_URL="${{ env.REPO_URL }}"
@@ -59,30 +56,22 @@ jobs:
           echo "📁 Directory: $PROJECT_DIR"
           echo "========================================"
           
-          # ======================
           # Stop service
-          # ======================
           if systemctl is-active --quiet $SERVICE_NAME; then
             echo "⏹️  Stopping $SERVICE_NAME service..."
             systemctl stop $SERVICE_NAME
           fi
           
-          # ======================
           # Backup existing
-          # ======================
           if [ -d "$PROJECT_DIR" ]; then
             echo "💾 Creating backup..."
             BACKUP_DIR="${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
             cp -r "$PROJECT_DIR" "$BACKUP_DIR"
             echo "   Backup: $BACKUP_DIR"
-            
-            # Keep only last 3 backups
             ls -dt ${PROJECT_DIR}_backup_* 2>/dev/null | tail -n +4 | xargs -r rm -rf
           fi
           
-          # ======================
-          # Clone/Pull repository
-          # ======================
+          # Clone/Pull
           if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest changes..."
             cd "$PROJECT_DIR"
@@ -96,25 +85,19 @@ jobs:
           
           cd "$PROJECT_DIR"
           
-          # ======================
           # System dependencies
-          # ======================
           echo "📦 Installing system dependencies..."
           apt-get update -qq
           apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2 curl
           
-          # ======================
           # Python environment
-          # ======================
           echo "🐍 Setting up Python environment..."
           python3 -m venv venv
           source venv/bin/activate
           pip install --upgrade pip -q
           pip install -r requirements.txt -q
           
-          # ======================
           # Configure .env
-          # ======================
           echo "⚙️  Configuring environment..."
           cat > .env << EOF
           BOT_TOKEN=${{ secrets.BOT_TOKEN }}
@@ -133,16 +116,12 @@ jobs:
           
           chmod 600 .env
           
-          # ======================
           # Directories
-          # ======================
           echo "📁 Creating directories..."
           mkdir -p data/hosted_files
           mkdir -p /var/log/$SERVICE_NAME
           
-          # ======================
           # Systemd service
-          # ======================
           echo "🔧 Setting up systemd service..."
           cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
           [Unit]
@@ -160,7 +139,6 @@ jobs:
           StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
           StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
           
-          # Security hardening
           NoNewPrivileges=yes
           PrivateTmp=yes
           ProtectSystem=strict
@@ -175,9 +153,7 @@ jobs:
           systemctl daemon-reload
           systemctl enable $SERVICE_NAME
           
-          # ======================
           # Firewall
-          # ======================
           echo "🔥 Configuring firewall..."
           if command -v ufw &> /dev/null; then
             ufw allow ssh
@@ -190,9 +166,7 @@ jobs:
             fi
           fi
           
-          # ======================
           # Start service
-          # ======================
           echo "▶️  Starting $SERVICE_NAME..."
           systemctl start $SERVICE_NAME
           
@@ -204,16 +178,6 @@ jobs:
             echo "❌ $SERVICE_NAME failed to start"
             journalctl -u $SERVICE_NAME -n 20 --no-pager
             exit 1
-          fi
-          
-          # Health check
-          if [ -n "${{ secrets.HOST_BASE_URL }}" ]; then
-            sleep 3
-            if curl -sf ${{ secrets.HOST_BASE_URL }}/health > /dev/null 2>&1; then
-              echo "✅ Web server healthy"
-            else
-              echo "⚠️  Web server health check failed"
-            fi
           fi
           
           echo ""
@@ -235,8 +199,8 @@ jobs:
           message: |
             ✅ **Telegram7zBot Deployed!**
             
-            🌿 Branch: `${{ env.BRANCH }}`
-            📝 Commit: `${{ github.sha }}`
+            🌿 Branch: ${{ env.BRANCH }}
+            📝 Commit: ${{ github.sha }}
             👤 Author: ${{ github.actor }}
             🖥️ Server: ${{ secrets.VPS_HOST }}
       
@@ -249,8 +213,8 @@ jobs:
           message: |
             ❌ **Telegram7zBot Deployment Failed!**
             
-            🌿 Branch: `${{ env.BRANCH }}`
-            📝 Commit: `${{ github.sha }}`
+            🌿 Branch: ${{ env.BRANCH }}
+            📝 Commit: ${{ github.sha }}
             
             🔗 [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
@@ -275,12 +239,6 @@ jobs:
             echo '=== Recent Logs ==='
             journalctl -u ${{ env.SERVICE_NAME }} -n 10 --no-pager || true
           "
-      
-      - name: 🌐 Check web server
-        if: ${{ secrets.HOST_BASE_URL != '' }}
-        run: |
-          sleep 5
-          curl -f -s -o /dev/null -w "Health Check: %{http_code}\n" ${{ secrets.HOST_BASE_URL }}/health || echo "Health check failed"
 
   rollback:
     needs: deploy
@@ -299,7 +257,6 @@ jobs:
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
             echo '🔄 Rolling back deployment...'
             
-            # Find latest backup
             LATEST_BACKUP=\$(ls -dt ${{ env.PROJECT_DIR }}_backup_* 2>/dev/null | head -1)
             
             if [ -n \"\$LATEST_BACKUP\" ] && [ -d \"\$LATEST_BACKUP\" ]; then

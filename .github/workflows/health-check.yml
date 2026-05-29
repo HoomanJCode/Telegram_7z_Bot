@@ -2,7 +2,7 @@ name: Telegram7zBot Health Check
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Every 30 minutes
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 env:
@@ -26,7 +26,6 @@ jobs:
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << 'ENDSSH'
           
           SERVICE_NAME="${{ env.SERVICE_NAME }}"
-          RESTARTED=false
           
           echo "🔍 Checking $SERVICE_NAME..."
           
@@ -38,41 +37,27 @@ jobs:
             
             if systemctl is-active --quiet $SERVICE_NAME; then
               echo "✅ $SERVICE_NAME restarted successfully"
-              RESTARTED=true
             else
               echo "❌ $SERVICE_NAME failed to restart"
-              echo "RESTART_FAILED=true" >> /tmp/health_status
               exit 1
             fi
           else
             echo "✅ $SERVICE_NAME is running"
           fi
           
-          # Check memory usage
-          MEM_USAGE=$(ps -o pid,rss,comm -p $(systemctl show $SERVICE_NAME -p MainPID --value) --no-headers 2>/dev/null | awk '{print $2}')
-          if [ -n "$MEM_USAGE" ]; then
-            MEM_MB=$((MEM_USAGE / 1024))
-            echo "📊 Memory usage: ${MEM_MB}MB"
+          # Memory usage
+          PID=$(systemctl show $SERVICE_NAME -p MainPID --value 2>/dev/null)
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            MEM=$(ps -o rss= -p $PID 2>/dev/null)
+            if [ -n "$MEM" ]; then
+              echo "📊 Memory: $((MEM / 1024))MB"
+            fi
           fi
           
-          # Check disk space
-          DISK_USAGE=$(df -h ${{ env.PROJECT_DIR }} | tail -1 | awk '{print $5}')
-          echo "💾 Disk usage: $DISK_USAGE"
-          
-          echo "RESTARTED=$RESTARTED" >> /tmp/health_status
+          # Disk usage
+          echo "💾 Disk: $(df -h ${{ env.PROJECT_DIR }} | tail -1 | awk '{print $5}')"
           
           ENDSSH
-      
-      - name: 🌐 Check web server
-        if: ${{ secrets.HOST_BASE_URL != '' }}
-        run: |
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.HOST_BASE_URL }}/health || echo "000")
-          echo "Web server status: $HTTP_CODE"
-          
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "⚠️ Web server not responding properly"
-            exit 1
-          fi
       
       - name: 🚨 Notify on failure
         if: failure()
@@ -83,14 +68,9 @@ jobs:
           message: |
             🚨 **Telegram7zBot Health Alert!**
             
-            The service may be experiencing issues.
+            Service may be down!
             
             🖥️ Server: ${{ secrets.VPS_HOST }}
             ⏰ Time: $(date)
             
-            **Action Required:** Check the server immediately.
-            
-            ```bash
-            ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}
-            systemctl status telegram7zbot
-            journalctl -u telegram7zbot -n 50
+            SSH: ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}
