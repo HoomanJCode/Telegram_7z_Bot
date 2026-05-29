@@ -40,18 +40,18 @@ jobs:
           ADMIN_IDS: ${{ secrets.ADMIN_IDS || '' }}
           WHITELIST: ${{ secrets.WHITELIST || '' }}
         run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << 'ENDSSH'
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << ENDSSH
           set -e
           
-          PROJECT_DIR="${{ env.PROJECT_DIR }}"
-          SERVICE_NAME="${{ env.SERVICE_NAME }}"
+          PROJECT_DIR="${PROJECT_DIR:-${{ env.PROJECT_DIR }}}"
+          SERVICE_NAME="${SERVICE_NAME:-${{ env.SERVICE_NAME }}}"
           
           echo "========================================"
           echo "  Telegram7zBot Deployment"
           echo "========================================"
           
           # Stop service
-          systemctl stop $SERVICE_NAME 2>/dev/null || true
+          systemctl stop \$SERVICE_NAME 2>/dev/null || true
           sleep 2
           
           # System dependencies
@@ -60,25 +60,25 @@ jobs:
           apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2 curl git
           
           # Create directories
-          mkdir -p /var/log/$SERVICE_NAME
+          mkdir -p /var/log/\$SERVICE_NAME
           
           # Clone/Pull
-          if [ -d "$PROJECT_DIR/.git" ]; then
+          if [ -d "\$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest code..."
-            cd "$PROJECT_DIR"
+            cd "\$PROJECT_DIR"
             git fetch origin
             git reset --hard origin/master
             git clean -fd
           else
             echo "📥 Cloning repository..."
-            rm -rf "$PROJECT_DIR"
-            git clone --branch master https://github.com/HoomanJCode/Telegram7zBot.git "$PROJECT_DIR"
-            cd "$PROJECT_DIR"
+            rm -rf "\$PROJECT_DIR"
+            git clone --branch master https://github.com/HoomanJCode/Telegram7zBot.git "\$PROJECT_DIR"
+            cd "\$PROJECT_DIR"
           fi
           
-          # Create .env with PROPER values (no spaces)
+          # Create .env with proper values
           echo "⚙️  Creating .env file..."
-          cat > "$PROJECT_DIR/.env" << EOF
+          cat > "\$PROJECT_DIR/.env" << 'EOF'
 BOT_TOKEN=${BOT_TOKEN}
 API_BASE_URL=
 API_BASE_FILE_URL=
@@ -93,33 +93,30 @@ WHITELIST=${WHITELIST}
 ADMIN_IDS=${ADMIN_IDS}
 EOF
           
-          chmod 600 "$PROJECT_DIR/.env"
+          chmod 600 "\$PROJECT_DIR/.env"
           
           # Verify .env
           echo "🔍 Checking .env..."
-          cat "$PROJECT_DIR/.env" | grep -v SECRET | grep -v TOKEN
-          
-          if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env"; then
+          if grep -q "^BOT_TOKEN=\$" "\$PROJECT_DIR/.env"; then
             echo "❌ ERROR: BOT_TOKEN is empty!"
-            echo "Please set BOT_TOKEN in GitHub Secrets"
             exit 1
           fi
           
           # Python venv
           echo "🐍 Setting up Python..."
-          cd "$PROJECT_DIR"
+          cd "\$PROJECT_DIR"
           rm -rf venv
           python3 -m venv venv
-          $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
-          $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
+          \$PROJECT_DIR/venv/bin/pip install --upgrade pip -q
+          \$PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
           
           # Create data dir
-          mkdir -p "$PROJECT_DIR/data/hosted_files"
+          mkdir -p "\$PROJECT_DIR/data/hosted_files"
           
           # Test config
           echo "🧪 Testing configuration..."
-          $PROJECT_DIR/venv/bin/python -c "
-          import sys; sys.path.insert(0, '$PROJECT_DIR')
+          \$PROJECT_DIR/venv/bin/python -c "
+          import sys; sys.path.insert(0, '\$PROJECT_DIR')
           from config import Settings
           s = Settings()
           print('Token:', 'SET' if s.token else 'MISSING')
@@ -129,50 +126,46 @@ EOF
           
           # Systemd service
           echo "🔧 Creating service..."
-          cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
-[Unit]
-Description=Telegram7zBot
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=$PROJECT_DIR
-ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
-Restart=on-failure
-RestartSec=10
-StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
-StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
-
-[Install]
-WantedBy=multi-user.target
-SERVICEEOF
+          cat > /etc/systemd/system/\$SERVICE_NAME.service << SERVICEEOF
+          [Unit]
+          Description=Telegram7zBot
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=\$PROJECT_DIR
+          ExecStart=\$PROJECT_DIR/venv/bin/python \$PROJECT_DIR/bot.py
+          Restart=on-failure
+          RestartSec=10
+          StandardOutput=append:/var/log/\$SERVICE_NAME/bot.log
+          StandardError=append:/var/log/\$SERVICE_NAME/bot_error.log
+          
+          [Install]
+          WantedBy=multi-user.target
+          SERVICEEOF
           
           systemctl daemon-reload
-          systemctl enable $SERVICE_NAME
+          systemctl enable \$SERVICE_NAME
           
           # Start
           echo "▶️  Starting service..."
-          systemctl start $SERVICE_NAME
+          systemctl start \$SERVICE_NAME
           sleep 5
           
-          if systemctl is-active --quiet $SERVICE_NAME; then
+          if systemctl is-active --quiet \$SERVICE_NAME; then
             echo "✅ Service is running!"
-            systemctl status $SERVICE_NAME --no-pager -l
+            systemctl status \$SERVICE_NAME --no-pager -l
           else
             echo "❌ Service failed!"
-            echo ""
             echo "=== Error Log ==="
-            tail -20 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
-            echo ""
+            tail -20 /var/log/\$SERVICE_NAME/bot_error.log 2>/dev/null || true
             echo "=== Journal ==="
-            journalctl -u $SERVICE_NAME -n 10 --no-pager || true
+            journalctl -u \$SERVICE_NAME -n 10 --no-pager || true
             exit 1
           fi
           
-          echo ""
           echo "✅ Deployment Complete!"
-          
           ENDSSH
       
       - name: ✅ Success Notification
