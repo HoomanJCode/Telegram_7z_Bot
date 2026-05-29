@@ -43,17 +43,17 @@ jobs:
       - name: 🚀 Deploy to VPS
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          API_BASE_URL: ${{ secrets.API_BASE_URL }}
-          API_BASE_FILE_URL: ${{ secrets.API_BASE_FILE_URL }}
-          HOST_BASE_URL: ${{ secrets.HOST_BASE_URL }}
-          HOST_PORT: ${{ secrets.HOST_PORT }}
-          STORE_TIME_HOURS: ${{ secrets.STORE_TIME_HOURS }}
-          MAX_TELEGRAM_SIZE_MB: ${{ secrets.MAX_TELEGRAM_SIZE_MB }}
-          DOWNLOAD_METHOD: ${{ secrets.DOWNLOAD_METHOD }}
-          ARIA2_RPC_URL: ${{ secrets.ARIA2_RPC_URL }}
-          ARIA2_SECRET: ${{ secrets.ARIA2_SECRET }}
-          WHITELIST: ${{ secrets.WHITELIST }}
-          ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL || '' }}
+          API_BASE_FILE_URL: ${{ secrets.API_BASE_FILE_URL || '' }}
+          HOST_BASE_URL: ${{ secrets.HOST_BASE_URL || '' }}
+          HOST_PORT: ${{ secrets.HOST_PORT || '8080' }}
+          STORE_TIME_HOURS: ${{ secrets.STORE_TIME_HOURS || '48' }}
+          MAX_TELEGRAM_SIZE_MB: ${{ secrets.MAX_TELEGRAM_SIZE_MB || '50' }}
+          DOWNLOAD_METHOD: ${{ secrets.DOWNLOAD_METHOD || 'aria2' }}
+          ARIA2_RPC_URL: ${{ secrets.ARIA2_RPC_URL || 'http://localhost:6800/jsonrpc' }}
+          ARIA2_SECRET: ${{ secrets.ARIA2_SECRET || '' }}
+          WHITELIST: ${{ secrets.WHITELIST || '' }}
+          ADMIN_IDS: ${{ secrets.ADMIN_IDS || '' }}
         run: |
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << 'ENDSSH'
           
@@ -67,11 +67,8 @@ jobs:
           echo "========================================"
           
           # Stop service
-          if systemctl is-active --quiet $SERVICE_NAME 2>/dev/null; then
-            echo "⏹️  Stopping $SERVICE_NAME..."
-            systemctl stop $SERVICE_NAME
-            sleep 2
-          fi
+          systemctl stop $SERVICE_NAME 2>/dev/null || true
+          sleep 2
           
           # Backup
           if [ -d "$PROJECT_DIR" ]; then
@@ -114,48 +111,38 @@ jobs:
           $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
           $PROJECT_DIR/venv/bin/pip install -r $PROJECT_DIR/requirements.txt
           
-          # Verify installation
-          echo "✅ Verifying packages..."
-          $PROJECT_DIR/venv/bin/python -c "import telegram; print('telegram:', telegram.__version__)" || echo "❌ telegram missing"
-          $PROJECT_DIR/venv/bin/python -c "import aiohttp; print('aiohttp:', aiohttp.__version__)" || echo "❌ aiohttp missing"
-          
-          # Configure .env
+          # Configure .env with defaults for empty values
           echo "⚙️  Configuring .env..."
           cat > "$PROJECT_DIR/.env" << EOF
-          BOT_TOKEN=$BOT_TOKEN
-          API_BASE_URL=$API_BASE_URL
-          API_BASE_FILE_URL=$API_BASE_FILE_URL
-          HOST_BASE_URL=$HOST_BASE_URL
-          HOST_PORT=$HOST_PORT
-          STORE_TIME_HOURS=$STORE_TIME_HOURS
-          MAX_TELEGRAM_SIZE_MB=$MAX_TELEGRAM_SIZE_MB
-          DOWNLOAD_METHOD=$DOWNLOAD_METHOD
-          ARIA2_RPC_URL=$ARIA2_RPC_URL
-          ARIA2_SECRET=$ARIA2_SECRET
-          WHITELIST=$WHITELIST
-          ADMIN_IDS=$ADMIN_IDS
+          BOT_TOKEN=${BOT_TOKEN}
+          API_BASE_URL=${API_BASE_URL}
+          API_BASE_FILE_URL=${API_BASE_FILE_URL}
+          HOST_BASE_URL=${HOST_BASE_URL}
+          HOST_PORT=${HOST_PORT:-8080}
+          STORE_TIME_HOURS=${STORE_TIME_HOURS:-48}
+          MAX_TELEGRAM_SIZE_MB=${MAX_TELEGRAM_SIZE_MB:-50}
+          DOWNLOAD_METHOD=${DOWNLOAD_METHOD:-aria2}
+          ARIA2_RPC_URL=${ARIA2_RPC_URL:-http://localhost:6800/jsonrpc}
+          ARIA2_SECRET=${ARIA2_SECRET}
+          WHITELIST=${WHITELIST}
+          ADMIN_IDS=${ADMIN_IDS}
           EOF
           
           chmod 600 "$PROJECT_DIR/.env"
           
           # Verify .env
-          echo "🔍 .env contents (masked):"
-          while IFS='=' read -r key val; do
-            if [ -n "$key" ]; then
-              if [ -n "$val" ] && [ "$val" != "your_bot_token_here" ]; then
-                echo "$key=***set***"
-              else
-                echo "$key=(empty)"
-              fi
-            fi
-          done < "$PROJECT_DIR/.env"
+          echo "🔍 .env verification:"
+          if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env" || grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env"; then
+            echo "❌ BOT_TOKEN is empty!"
+          else
+            echo "✅ BOT_TOKEN is set"
+          fi
           
           # Create directories
-          echo "📁 Creating directories..."
           mkdir -p "$PROJECT_DIR/data/hosted_files"
           
-          # Test bot config
-          echo "🧪 Testing bot config..."
+          # Test bot
+          echo "🧪 Testing bot..."
           cd "$PROJECT_DIR"
           $PROJECT_DIR/venv/bin/python -c "
           import sys
@@ -164,13 +151,12 @@ jobs:
               from config import Settings
               s = Settings()
               print('✅ Config loaded')
-              if s.token:
-                  print('Token: ***set***')
-              else:
-                  print('Token: MISSING')
+              print('Token set:', bool(s.token))
+              print('Port:', s.host_port)
+              print('Store hours:', s.store_time_hours)
           except Exception as e:
-              print(f'❌ Config error: {e}')
-          " 2>&1 || true
+              print(f'❌ Error: {e}')
+          " 2>&1
           
           # Systemd service
           echo "🔧 Setting up systemd service..."
@@ -199,11 +185,10 @@ jobs:
           systemctl enable $SERVICE_NAME
           
           # Firewall
-          echo "🔥 Configuring firewall..."
           if command -v ufw &> /dev/null; then
             ufw allow ssh 2>/dev/null || true
-            if [ -n "$HOST_PORT" ]; then
-              ufw allow $HOST_PORT/tcp 2>/dev/null || true
+            if [ -n "${HOST_PORT}" ] && [ "${HOST_PORT}" != "8080" ]; then
+              ufw allow ${HOST_PORT}/tcp 2>/dev/null || true
             fi
           fi
           
@@ -241,7 +226,6 @@ jobs:
           token: ${{ secrets.BOT_TOKEN }}
           message: |
             ✅ **Telegram7zBot Deployed!**
-            
             🌿 Branch: ${{ env.BRANCH }}
             🖥️ Server: ${{ secrets.VPS_HOST }}
       
