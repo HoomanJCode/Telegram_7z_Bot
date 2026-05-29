@@ -1,69 +1,88 @@
-name: Deploy FileBot to VPS (Git Clone)
+name: Deploy Telegram7zBot to VPS
 
 on:
   push:
     branches:
-      - main
       - master
   workflow_dispatch:
     inputs:
       branch:
         description: 'Branch to deploy'
         required: false
-        default: 'main'
+        default: 'master'
 
 env:
-  PROJECT_DIR: /opt/filebot
+  PROJECT_DIR: /opt/Telegram7zBot
   REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
   BRANCH: ${{ github.event.inputs.branch || github.ref_name }}
+  SERVICE_NAME: telegram7zbot
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    name: 🚀 Deploy to VPS
     
     steps:
-      - name: Setup SSH
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+      
+      - name: 🔑 Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
       
-      - name: Add VPS and GitHub to known hosts
+      - name: 🔗 Add hosts to known_hosts
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
       
-      - name: Deploy to VPS via Git Clone
+      - name: 🚀 Deploy to VPS
         run: |
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << 'ENDSSH'
           
+          # ======================
           # Configuration
-          PROJECT_DIR="/opt/filebot"
+          # ======================
+          PROJECT_DIR="${{ env.PROJECT_DIR }}"
           BRANCH="${{ env.BRANCH }}"
           REPO_URL="${{ env.REPO_URL }}"
+          SERVICE_NAME="${{ env.SERVICE_NAME }}"
           
-          echo "🚀 Starting deployment..."
+          echo "========================================"
+          echo "  Telegram7zBot Deployment"
+          echo "========================================"
           echo "📦 Project: $REPO_URL"
           echo "🌿 Branch: $BRANCH"
+          echo "📁 Directory: $PROJECT_DIR"
+          echo "========================================"
           
+          # ======================
           # Stop service
-          if systemctl is-active --quiet filebot; then
-            echo "⏹️  Stopping FileBot service..."
-            systemctl stop filebot
+          # ======================
+          if systemctl is-active --quiet $SERVICE_NAME; then
+            echo "⏹️  Stopping $SERVICE_NAME service..."
+            systemctl stop $SERVICE_NAME
           fi
           
-          # Backup existing installation
+          # ======================
+          # Backup existing
+          # ======================
           if [ -d "$PROJECT_DIR" ]; then
             echo "💾 Creating backup..."
             BACKUP_DIR="${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
             cp -r "$PROJECT_DIR" "$BACKUP_DIR"
-            echo "Backup saved to: $BACKUP_DIR"
+            echo "   Backup: $BACKUP_DIR"
             
             # Keep only last 3 backups
-            ls -dt ${PROJECT_DIR}_backup_* | tail -n +4 | xargs -r rm -rf
+            ls -dt ${PROJECT_DIR}_backup_* 2>/dev/null | tail -n +4 | xargs -r rm -rf
           fi
           
-          # Clone or pull repository
+          # ======================
+          # Clone/Pull repository
+          # ======================
           if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest changes..."
             cd "$PROJECT_DIR"
@@ -77,20 +96,26 @@ jobs:
           
           cd "$PROJECT_DIR"
           
-          # Install system dependencies
+          # ======================
+          # System dependencies
+          # ======================
           echo "📦 Installing system dependencies..."
           apt-get update -qq
-          apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2
+          apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2 curl
           
-          # Setup virtual environment
+          # ======================
+          # Python environment
+          # ======================
           echo "🐍 Setting up Python environment..."
           python3 -m venv venv
           source venv/bin/activate
-          pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --upgrade pip -q
+          pip install -r requirements.txt -q
           
-          # Create .env file
-          echo "⚙️  Creating .env configuration..."
+          # ======================
+          # Configure .env
+          # ======================
+          echo "⚙️  Configuring environment..."
           cat > .env << EOF
           BOT_TOKEN=${{ secrets.BOT_TOKEN }}
           API_BASE_URL=${{ secrets.API_BASE_URL }}
@@ -108,56 +133,76 @@ jobs:
           
           chmod 600 .env
           
-          # Create directories
+          # ======================
+          # Directories
+          # ======================
+          echo "📁 Creating directories..."
           mkdir -p data/hosted_files
-          mkdir -p /var/log/filebot
+          mkdir -p /var/log/$SERVICE_NAME
           
-          # Setup systemd service
+          # ======================
+          # Systemd service
+          # ======================
           echo "🔧 Setting up systemd service..."
-          cat > /etc/systemd/system/filebot.service << EOF
+          cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
           [Unit]
-          Description=FileBot Telegram Bot
+          Description=Telegram7zBot - Telegram Download Manager
           After=network.target
+          Wants=network.target
           
           [Service]
           Type=simple
           WorkingDirectory=$PROJECT_DIR
+          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
           ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
           Restart=always
           RestartSec=10
-          StandardOutput=append:/var/log/filebot/bot.log
-          StandardError=append:/var/log/filebot/bot_error.log
+          StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
+          StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
+          
+          # Security hardening
+          NoNewPrivileges=yes
+          PrivateTmp=yes
+          ProtectSystem=strict
+          ProtectHome=yes
+          ReadWritePaths=$PROJECT_DIR/data /var/log/$SERVICE_NAME
+          ReadOnlyPaths=$PROJECT_DIR
           
           [Install]
           WantedBy=multi-user.target
           EOF
           
           systemctl daemon-reload
-          systemctl enable filebot
+          systemctl enable $SERVICE_NAME
           
-          # Configure firewall
+          # ======================
+          # Firewall
+          # ======================
           echo "🔥 Configuring firewall..."
           if command -v ufw &> /dev/null; then
             ufw allow ssh
             if [ -n "${{ secrets.HOST_PORT }}" ]; then
               ufw allow ${{ secrets.HOST_PORT }}/tcp
+              echo "   Port ${{ secrets.HOST_PORT }} opened"
             fi
             if ! ufw status | grep -q "Status: active"; then
               ufw --force enable
             fi
           fi
           
+          # ======================
           # Start service
-          echo "▶️  Starting FileBot service..."
-          systemctl start filebot
+          # ======================
+          echo "▶️  Starting $SERVICE_NAME..."
+          systemctl start $SERVICE_NAME
           
-          # Check status
           sleep 5
-          if systemctl is-active --quiet filebot; then
-            echo "✅ FileBot is running!"
+          
+          if systemctl is-active --quiet $SERVICE_NAME; then
+            echo "✅ $SERVICE_NAME is running!"
           else
-            echo "❌ FileBot failed to start"
-            journalctl -u filebot -n 20 --no-pager
+            echo "❌ $SERVICE_NAME failed to start"
+            journalctl -u $SERVICE_NAME -n 20 --no-pager
             exit 1
           fi
           
@@ -165,43 +210,109 @@ jobs:
           if [ -n "${{ secrets.HOST_BASE_URL }}" ]; then
             sleep 3
             if curl -sf ${{ secrets.HOST_BASE_URL }}/health > /dev/null 2>&1; then
-              echo "✅ Web server is healthy"
+              echo "✅ Web server healthy"
             else
               echo "⚠️  Web server health check failed"
             fi
           fi
           
-          echo "🎉 Deployment completed!"
+          echo ""
+          echo "========================================"
+          echo "  ✅ Deployment Complete!"
+          echo "========================================"
+          echo ""
           
           ENDSSH
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       
-      - name: Notify success
+      - name: ✅ Notify success
         if: success()
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.BOT_TOKEN }}
           message: |
-            ✅ **FileBot Deployed Successfully!**
+            ✅ **Telegram7zBot Deployed!**
             
             🌿 Branch: `${{ env.BRANCH }}`
             📝 Commit: `${{ github.sha }}`
             👤 Author: ${{ github.actor }}
-            
             🖥️ Server: ${{ secrets.VPS_HOST }}
       
-      - name: Notify failure
+      - name: ❌ Notify failure
         if: failure()
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.BOT_TOKEN }}
           message: |
-            ❌ **FileBot Deployment Failed!**
+            ❌ **Telegram7zBot Deployment Failed!**
             
             🌿 Branch: `${{ env.BRANCH }}`
             📝 Commit: `${{ github.sha }}`
             
             🔗 [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+  health-check:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: success()
+    name: 🏥 Health Check
+    
+    steps:
+      - name: 🔑 Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      
+      - name: 🏥 Check service status
+        run: |
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
+            echo '=== Service Status ==='
+            systemctl status ${{ env.SERVICE_NAME }} --no-pager -l || true
+            echo ''
+            echo '=== Recent Logs ==='
+            journalctl -u ${{ env.SERVICE_NAME }} -n 10 --no-pager || true
+          "
+      
+      - name: 🌐 Check web server
+        if: ${{ secrets.HOST_BASE_URL != '' }}
+        run: |
+          sleep 5
+          curl -f -s -o /dev/null -w "Health Check: %{http_code}\n" ${{ secrets.HOST_BASE_URL }}/health || echo "Health check failed"
+
+  rollback:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: failure()
+    name: 🔄 Rollback
+    
+    steps:
+      - name: 🔑 Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      
+      - name: 🔄 Execute rollback
+        run: |
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
+            echo '🔄 Rolling back deployment...'
+            
+            # Find latest backup
+            LATEST_BACKUP=\$(ls -dt ${{ env.PROJECT_DIR }}_backup_* 2>/dev/null | head -1)
+            
+            if [ -n \"\$LATEST_BACKUP\" ] && [ -d \"\$LATEST_BACKUP\" ]; then
+              echo \"Restoring from: \$LATEST_BACKUP\"
+              
+              systemctl stop ${{ env.SERVICE_NAME }}
+              rm -rf ${{ env.PROJECT_DIR }}
+              cp -r \"\$LATEST_BACKUP\" ${{ env.PROJECT_DIR }}
+              systemctl start ${{ env.SERVICE_NAME }}
+              
+              echo '✅ Rollback complete'
+            else
+              echo '❌ No backup found for rollback'
+              exit 1
+            fi
+          "

@@ -1,22 +1,31 @@
 #!/bin/bash
 
-# FileBot Manual Deployment Script
+# ============================================
+# Telegram7zBot - Manual Deployment Script
+# ============================================
 # Usage: bash deploy.sh [branch]
+# Example: bash deploy.sh main
 
 set -e
 
+# Configuration
 BRANCH=${1:-main}
-PROJECT_DIR="/opt/filebot"
-REPO_URL="https://github.com/YOUR_USERNAME/filebot.git"
+PROJECT_DIR="/opt/Telegram7zBot"
+SERVICE_NAME="telegram7zbot"
+REPO_URL="https://github.com/HoomanJCode/Telegram7zBot.git"
 
-echo "🚀 Deploying FileBot..."
+echo "========================================"
+echo "  Telegram7zBot Deployment"
+echo "========================================"
 echo "📦 Repository: $REPO_URL"
 echo "🌿 Branch: $BRANCH"
+echo "📁 Directory: $PROJECT_DIR"
+echo "========================================"
 
 # Stop service
-if systemctl is-active --quiet filebot; then
-    echo "⏹️  Stopping service..."
-    systemctl stop filebot
+if systemctl is-active --quiet $SERVICE_NAME; then
+    echo "⏹️  Stopping $SERVICE_NAME..."
+    systemctl stop $SERVICE_NAME
 fi
 
 # Backup
@@ -24,7 +33,6 @@ if [ -d "$PROJECT_DIR" ]; then
     BACKUP="${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
     cp -r "$PROJECT_DIR" "$BACKUP"
     echo "💾 Backup: $BACKUP"
-    # Keep only last 3 backups
     ls -dt ${PROJECT_DIR}_backup_* 2>/dev/null | tail -n +4 | xargs -r rm -rf
 fi
 
@@ -39,109 +47,64 @@ else
     cd "$PROJECT_DIR"
 fi
 
-# Install system dependencies
+# System dependencies
 echo "📦 Installing system dependencies..."
 apt-get update -qq
 apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2
 
-# Python virtual environment
-echo "🐍 Setting up Python environment..."
+# Python setup
+echo "🐍 Setting up Python..."
 python3 -m venv venv
 source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+pip install --upgrade pip -q
+pip install -r requirements.txt -q
 
-# Setup .env file if not exists
+# Create .env if not exists
 if [ ! -f ".env" ]; then
     if [ -f "env.example" ]; then
-        echo "📋 Creating .env from env.example..."
         cp env.example .env
-        echo "⚠️  Please edit .env with your settings!"
-        echo "   nano $PROJECT_DIR/.env"
-    else
-        echo "⚠️  No env.example found, creating empty .env..."
-        touch .env
+        echo "⚠️  .env created from env.example - please edit it!"
     fi
 fi
 
-# Create required directories
-echo "📁 Creating directories..."
-mkdir -p data/hosted_files
-mkdir -p /var/log/filebot
+# Directories
+mkdir -p data/hosted_files /var/log/$SERVICE_NAME
 
-# Setup systemd service
-echo "🔧 Setting up systemd service..."
-cat > /etc/systemd/system/filebot.service << EOF
+# Systemd service
+cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
-Description=FileBot Telegram Bot
+Description=Telegram7zBot - Telegram Download Manager
 After=network.target
-Wants=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=$PROJECT_DIR
-Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
 Restart=always
 RestartSec=10
-StandardOutput=append:/var/log/filebot/bot.log
-StandardError=append:/var/log/filebot/bot_error.log
-
-# Security hardening
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=$PROJECT_DIR/data /var/log/filebot
-ReadOnlyPaths=$PROJECT_DIR
+StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
+StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Reload and enable service
 systemctl daemon-reload
-systemctl enable filebot
+systemctl enable $SERVICE_NAME
+systemctl start $SERVICE_NAME
 
-# Configure firewall if UFW is available
-if command -v ufw &> /dev/null; then
-    echo "🔥 Configuring firewall..."
-    ufw allow ssh
-    
-    # Read port from .env if exists
-    if [ -f ".env" ]; then
-        HOST_PORT=$(grep HOST_PORT .env | cut -d '=' -f2)
-        if [ -n "$HOST_PORT" ]; then
-            ufw allow $HOST_PORT/tcp
-            echo "   Opened port $HOST_PORT"
-        fi
-    fi
-    
-    if ! ufw status | grep -q "Status: active"; then
-        ufw --force enable
-        echo "   Firewall enabled"
-    fi
-fi
-
-# Start service
-echo "▶️  Starting FileBot..."
-systemctl start filebot
-
-# Wait and check
 sleep 5
-if systemctl is-active --quiet filebot; then
+
+if systemctl is-active --quiet $SERVICE_NAME; then
     echo ""
-    echo "✅ FileBot deployed successfully!"
+    echo "✅ Telegram7zBot deployed successfully!"
     echo ""
-    echo "📋 Useful commands:"
-    echo "   systemctl status filebot     # Check status"
-    echo "   journalctl -u filebot -f     # View logs"
-    echo "   systemctl restart filebot    # Restart bot"
-    echo "   nano $PROJECT_DIR/.env       # Edit configuration"
-    echo ""
+    echo "📋 Commands:"
+    echo "   systemctl status $SERVICE_NAME"
+    echo "   journalctl -u $SERVICE_NAME -f"
+    echo "   systemctl restart $SERVICE_NAME"
 else
-    echo "❌ FileBot failed to start!"
-    echo "Check logs: journalctl -u filebot -n 50"
-    journalctl -u filebot -n 20 --no-pager
+    echo "❌ Failed to start!"
+    journalctl -u $SERVICE_NAME -n 20 --no-pager
     exit 1
 fi
