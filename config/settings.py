@@ -13,18 +13,18 @@ class Settings:
     
     def _get_int(self, key: str, default: int) -> int:
         """Get integer from env, handling empty strings."""
-        value = os.getenv(key, "").strip()
-        if not value:
+        value = os.getenv(key, "")
+        if value is None or value.strip() == "":
             return default
         try:
-            return int(value)
+            return int(value.strip())
         except ValueError:
             return default
     
     def _get_str(self, key: str, default: str = "") -> str:
         """Get string from env, handling None."""
-        value = os.getenv(key, "")
-        if value is None:
+        value = os.getenv(key)
+        if value is None or value.strip() == "":
             return default
         return value.strip()
     
@@ -116,26 +116,18 @@ class Settings:
         errors = []
         if not self.token:
             errors.append("BOT_TOKEN is required in .env file")
-        if self.store_time_hours < 1:
-            errors.append("STORE_TIME_HOURS must be at least 1")
-        if self.max_telegram_size_mb < 1 or self.max_telegram_size_mb > 50:
-            errors.append("MAX_TELEGRAM_SIZE_MB must be between 1 and 50")
-        if self.download_method not in ["aria2", "direct"]:
-            errors.append("DOWNLOAD_METHOD must be 'aria2' or 'direct'")
         return errors
     
     def display(self) -> str:
-        from utils.helpers import mask_string
-        
         lines = [
-            "📋 Current Configuration",
-            f"• Token: {'✅ Set' if self.token else '❌ Missing'}",
-            f"• API Base: {self.api_base_url or 'Default'}",
-            f"• Host: {self.host_base_url or 'Disabled'}",
-            f"• Port: {self.host_port}",
-            f"• Storage: {self.store_time_hours} hours",
-            f"• Max File: {self.max_telegram_size_mb} MB",
-            f"• Download: {self.download_method}",
-            f"• Whitelist: {'On' if self.is_whitelist_enabled else 'Off'}",
+            "📋 Configuration:",
+            f"  Token: {'✅ Set' if self.token else '❌ MISSING'}",
+            f"  API: {self.api_base_url or 'Default'}",
+            f"  Host: {self.host_base_url or 'Disabled'}",
+            f"  Port: {self.host_port}",
+            f"  Storage: {self.store_time_hours}h",
+            f"  Max Size: {self.max_telegram_size_mb}MB",
+            f"  Download: {self.download_method}",
+            f"  Whitelist: {'On' if self.is_whitelist_enabled else 'Off'}",
         ]
         return "\n".join(lines)

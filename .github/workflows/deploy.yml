@@ -3,19 +3,11 @@ name: Deploy Telegram7zBot to VPS
 on:
   push:
     branches:
-      - main
       - master
   workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch to deploy'
-        required: false
-        default: 'main'
 
 env:
   PROJECT_DIR: /opt/Telegram7zBot
-  REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
-  BRANCH: ${{ github.event.inputs.branch || github.ref_name }}
   SERVICE_NAME: telegram7zbot
 
 jobs:
@@ -26,40 +18,32 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ env.BRANCH }}
       
       - name: 🔑 Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
       
-      - name: 🔗 Add hosts to known_hosts
+      - name: 🔗 Add host key
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
-          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
       
       - name: 🚀 Deploy to VPS
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          API_BASE_URL: ${{ secrets.API_BASE_URL || '' }}
-          API_BASE_FILE_URL: ${{ secrets.API_BASE_FILE_URL || '' }}
           HOST_BASE_URL: ${{ secrets.HOST_BASE_URL || '' }}
           HOST_PORT: ${{ secrets.HOST_PORT || '8080' }}
           STORE_TIME_HOURS: ${{ secrets.STORE_TIME_HOURS || '48' }}
           MAX_TELEGRAM_SIZE_MB: ${{ secrets.MAX_TELEGRAM_SIZE_MB || '50' }}
           DOWNLOAD_METHOD: ${{ secrets.DOWNLOAD_METHOD || 'aria2' }}
-          ARIA2_RPC_URL: ${{ secrets.ARIA2_RPC_URL || 'http://localhost:6800/jsonrpc' }}
-          ARIA2_SECRET: ${{ secrets.ARIA2_SECRET || '' }}
-          WHITELIST: ${{ secrets.WHITELIST || '' }}
           ADMIN_IDS: ${{ secrets.ADMIN_IDS || '' }}
+          WHITELIST: ${{ secrets.WHITELIST || '' }}
         run: |
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << 'ENDSSH'
+          set -e
           
           PROJECT_DIR="${{ env.PROJECT_DIR }}"
-          BRANCH="${{ env.BRANCH }}"
-          REPO_URL="${{ env.REPO_URL }}"
           SERVICE_NAME="${{ env.SERVICE_NAME }}"
           
           echo "========================================"
@@ -70,155 +54,128 @@ jobs:
           systemctl stop $SERVICE_NAME 2>/dev/null || true
           sleep 2
           
-          # Backup
-          if [ -d "$PROJECT_DIR" ]; then
-            echo "💾 Creating backup..."
-            BACKUP_DIR="${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
-            cp -r "$PROJECT_DIR" "$BACKUP_DIR"
-            echo "   Backup: $BACKUP_DIR"
-            ls -dt ${PROJECT_DIR}_backup_* 2>/dev/null | tail -n +4 | xargs -r rm -rf
-          fi
+          # System dependencies
+          echo "📦 Installing dependencies..."
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2 curl git
+          
+          # Create directories
+          mkdir -p /var/log/$SERVICE_NAME
           
           # Clone/Pull
           if [ -d "$PROJECT_DIR/.git" ]; then
-            echo "📥 Pulling latest changes..."
+            echo "📥 Pulling latest code..."
             cd "$PROJECT_DIR"
             git fetch origin
-            git reset --hard origin/$BRANCH
+            git reset --hard origin/master
             git clean -fd
           else
             echo "📥 Cloning repository..."
             rm -rf "$PROJECT_DIR"
-            git clone --branch $BRANCH --single-branch $REPO_URL "$PROJECT_DIR"
+            git clone --branch master https://github.com/HoomanJCode/Telegram7zBot.git "$PROJECT_DIR"
+            cd "$PROJECT_DIR"
           fi
           
-          cd "$PROJECT_DIR"
-          
-          # System dependencies
-          echo "📦 Installing system dependencies..."
-          apt-get update -qq
-          apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2 curl
-          
-          # Create log directory
-          mkdir -p /var/log/$SERVICE_NAME
-          
-          # Python environment
-          echo "🐍 Setting up Python environment..."
-          rm -rf venv
-          python3 -m venv venv
-          
-          echo "📦 Installing Python packages..."
-          $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
-          $PROJECT_DIR/venv/bin/pip install -r $PROJECT_DIR/requirements.txt
-          
-          # Configure .env with defaults for empty values
-          echo "⚙️  Configuring .env..."
+          # Create .env with PROPER values (no spaces)
+          echo "⚙️  Creating .env file..."
           cat > "$PROJECT_DIR/.env" << EOF
-          BOT_TOKEN=${BOT_TOKEN}
-          API_BASE_URL=${API_BASE_URL}
-          API_BASE_FILE_URL=${API_BASE_FILE_URL}
-          HOST_BASE_URL=${HOST_BASE_URL}
-          HOST_PORT=${HOST_PORT:-8080}
-          STORE_TIME_HOURS=${STORE_TIME_HOURS:-48}
-          MAX_TELEGRAM_SIZE_MB=${MAX_TELEGRAM_SIZE_MB:-50}
-          DOWNLOAD_METHOD=${DOWNLOAD_METHOD:-aria2}
-          ARIA2_RPC_URL=${ARIA2_RPC_URL:-http://localhost:6800/jsonrpc}
-          ARIA2_SECRET=${ARIA2_SECRET}
-          WHITELIST=${WHITELIST}
-          ADMIN_IDS=${ADMIN_IDS}
-          EOF
+BOT_TOKEN=${BOT_TOKEN}
+API_BASE_URL=
+API_BASE_FILE_URL=
+HOST_BASE_URL=${HOST_BASE_URL}
+HOST_PORT=${HOST_PORT}
+STORE_TIME_HOURS=${STORE_TIME_HOURS}
+MAX_TELEGRAM_SIZE_MB=${MAX_TELEGRAM_SIZE_MB}
+DOWNLOAD_METHOD=${DOWNLOAD_METHOD}
+ARIA2_RPC_URL=http://localhost:6800/jsonrpc
+ARIA2_SECRET=
+WHITELIST=${WHITELIST}
+ADMIN_IDS=${ADMIN_IDS}
+EOF
           
           chmod 600 "$PROJECT_DIR/.env"
           
           # Verify .env
-          echo "🔍 .env verification:"
-          if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env" || grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env"; then
-            echo "❌ BOT_TOKEN is empty!"
-          else
-            echo "✅ BOT_TOKEN is set"
+          echo "🔍 Checking .env..."
+          cat "$PROJECT_DIR/.env" | grep -v SECRET | grep -v TOKEN
+          
+          if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env"; then
+            echo "❌ ERROR: BOT_TOKEN is empty!"
+            echo "Please set BOT_TOKEN in GitHub Secrets"
+            exit 1
           fi
           
-          # Create directories
+          # Python venv
+          echo "🐍 Setting up Python..."
+          cd "$PROJECT_DIR"
+          rm -rf venv
+          python3 -m venv venv
+          $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
+          $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
+          
+          # Create data dir
           mkdir -p "$PROJECT_DIR/data/hosted_files"
           
-          # Test bot
-          echo "🧪 Testing bot..."
-          cd "$PROJECT_DIR"
+          # Test config
+          echo "🧪 Testing configuration..."
           $PROJECT_DIR/venv/bin/python -c "
-          import sys
-          sys.path.insert(0, '$PROJECT_DIR')
-          try:
-              from config import Settings
-              s = Settings()
-              print('✅ Config loaded')
-              print('Token set:', bool(s.token))
-              print('Port:', s.host_port)
-              print('Store hours:', s.store_time_hours)
-          except Exception as e:
-              print(f'❌ Error: {e}')
+          import sys; sys.path.insert(0, '$PROJECT_DIR')
+          from config import Settings
+          s = Settings()
+          print('Token:', 'SET' if s.token else 'MISSING')
+          print('Port:', s.host_port)
+          print('Storage:', s.store_time_hours)
           " 2>&1
           
           # Systemd service
-          echo "🔧 Setting up systemd service..."
+          echo "🔧 Creating service..."
           cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
-          [Unit]
-          Description=Telegram7zBot - Telegram Download Manager
-          After=network.target
-          Wants=network.target
-          
-          [Service]
-          Type=simple
-          User=root
-          WorkingDirectory=$PROJECT_DIR
-          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
-          ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
-          Restart=always
-          RestartSec=10
-          StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
-          StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
-          
-          [Install]
-          WantedBy=multi-user.target
-          SERVICEEOF
+[Unit]
+Description=Telegram7zBot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$PROJECT_DIR
+ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
+StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
           
           systemctl daemon-reload
           systemctl enable $SERVICE_NAME
           
-          # Firewall
-          if command -v ufw &> /dev/null; then
-            ufw allow ssh 2>/dev/null || true
-            if [ -n "${HOST_PORT}" ] && [ "${HOST_PORT}" != "8080" ]; then
-              ufw allow ${HOST_PORT}/tcp 2>/dev/null || true
-            fi
-          fi
-          
-          # Start service
-          echo "▶️  Starting $SERVICE_NAME..."
+          # Start
+          echo "▶️  Starting service..."
           systemctl start $SERVICE_NAME
           sleep 5
           
           if systemctl is-active --quiet $SERVICE_NAME; then
-            echo "✅ $SERVICE_NAME is running!"
+            echo "✅ Service is running!"
             systemctl status $SERVICE_NAME --no-pager -l
           else
-            echo "❌ $SERVICE_NAME failed to start"
+            echo "❌ Service failed!"
             echo ""
             echo "=== Error Log ==="
-            tail -30 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
+            tail -20 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
             echo ""
             echo "=== Journal ==="
-            journalctl -u $SERVICE_NAME -n 20 --no-pager || true
+            journalctl -u $SERVICE_NAME -n 10 --no-pager || true
             exit 1
           fi
           
           echo ""
-          echo "========================================"
-          echo "  ✅ Deployment Complete!"
-          echo "========================================"
+          echo "✅ Deployment Complete!"
           
           ENDSSH
       
-      - name: ✅ Notify success
+      - name: ✅ Success Notification
         if: success()
         uses: appleboy/telegram-action@master
         with:
@@ -226,10 +183,9 @@ jobs:
           token: ${{ secrets.BOT_TOKEN }}
           message: |
             ✅ **Telegram7zBot Deployed!**
-            🌿 Branch: ${{ env.BRANCH }}
-            🖥️ Server: ${{ secrets.VPS_HOST }}
+            🖥️ ${{ secrets.VPS_HOST }}
       
-      - name: ❌ Notify failure
+      - name: ❌ Failure Notification
         if: failure()
         uses: appleboy/telegram-action@master
         with:
@@ -238,28 +194,3 @@ jobs:
           message: |
             ❌ **Deployment Failed!**
             🔗 [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-  rollback:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: failure()
-    name: 🔄 Rollback
-    
-    steps:
-      - name: 🔑 Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-      
-      - name: 🔄 Execute rollback
-        run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
-            LATEST_BACKUP=\$(ls -dt ${{ env.PROJECT_DIR }}_backup_* 2>/dev/null | head -1)
-            if [ -n \"\$LATEST_BACKUP\" ] && [ -d \"\$LATEST_BACKUP\" ]; then
-              systemctl stop ${{ env.SERVICE_NAME }} 2>/dev/null || true
-              rm -rf ${{ env.PROJECT_DIR }}
-              cp -r \"\$LATEST_BACKUP\" ${{ env.PROJECT_DIR }}
-              systemctl start ${{ env.SERVICE_NAME }}
-              echo '✅ Rollback complete'
-            fi
-          "
