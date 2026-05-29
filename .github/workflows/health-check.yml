@@ -1,0 +1,44 @@
+name: Health Check
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Every 30 minutes
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check bot service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            if ! systemctl is-active --quiet filebot; then
+              echo "❌ FileBot service is not running!"
+              systemctl restart filebot
+              echo "Service restarted"
+              exit 1
+            fi
+            echo "✅ FileBot service is running"
+      
+      - name: Check web server
+        if: ${{ secrets.HOST_BASE_URL != '' }}
+        run: |
+          curl -f -s -o /dev/null -w "%{http_code}" ${{ secrets.HOST_BASE_URL }}/health || echo "Health check failed"
+      
+      - name: Notify on failure
+        if: failure()
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.BOT_TOKEN }}
+          message: |
+            🚨 **FileBot Health Check Failed!**
+            
+            The bot may be down. Check the server immediately.
+            
+            SSH: ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}
