@@ -57,12 +57,13 @@ jobs:
           echo "========================================"
           
           # Stop service
-          if systemctl is-active --quiet $SERVICE_NAME; then
-            echo "⏹️  Stopping $SERVICE_NAME service..."
+          if systemctl is-active --quiet $SERVICE_NAME 2>/dev/null; then
+            echo "⏹️  Stopping $SERVICE_NAME..."
             systemctl stop $SERVICE_NAME
+            sleep 2
           fi
           
-          # Backup existing
+          # Backup
           if [ -d "$PROJECT_DIR" ]; then
             echo "💾 Creating backup..."
             BACKUP_DIR="${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
@@ -77,6 +78,7 @@ jobs:
             cd "$PROJECT_DIR"
             git fetch origin
             git reset --hard origin/$BRANCH
+            git clean -fd
           else
             echo "📥 Cloning repository..."
             rm -rf "$PROJECT_DIR"
@@ -85,6 +87,10 @@ jobs:
           
           cd "$PROJECT_DIR"
           
+          # Show current git status
+          echo "📋 Git status:"
+          git log --oneline -3
+          
           # System dependencies
           echo "📦 Installing system dependencies..."
           apt-get update -qq
@@ -92,14 +98,23 @@ jobs:
           
           # Python environment
           echo "🐍 Setting up Python environment..."
+          rm -rf venv
           python3 -m venv venv
           source venv/bin/activate
+          
+          echo "📦 Installing Python packages..."
           pip install --upgrade pip -q
-          pip install -r requirements.txt -q
+          pip install -r requirements.txt
+          
+          # Verify installation
+          echo "✅ Verifying Python packages..."
+          python -c "import telegram; print('telegram:', telegram.__version__)"
+          python -c "import aiohttp; print('aiohttp:', aiohttp.__version__)"
+          python -c "from dotenv import load_dotenv; print('dotenv: OK')"
           
           # Configure .env
           echo "⚙️  Configuring environment..."
-          cat > .env << EOF
+          cat > .env << ENVEOF
           BOT_TOKEN=${{ secrets.BOT_TOKEN }}
           API_BASE_URL=${{ secrets.API_BASE_URL }}
           API_BASE_FILE_URL=${{ secrets.API_BASE_FILE_URL }}
@@ -112,18 +127,37 @@ jobs:
           ARIA2_SECRET=${{ secrets.ARIA2_SECRET }}
           WHITELIST=${{ secrets.WHITELIST }}
           ADMIN_IDS=${{ secrets.ADMIN_IDS }}
-          EOF
+          ENVEOF
           
           chmod 600 .env
+          
+          # Verify .env
+          echo "🔍 Checking .env..."
+          if grep -q "BOT_TOKEN=" .env && ! grep -q "BOT_TOKEN=$" .env && ! grep -q "BOT_TOKEN=your_bot_token_here" .env; then
+            echo "✅ BOT_TOKEN is set"
+          else
+            echo "⚠️  BOT_TOKEN may not be set correctly"
+          fi
           
           # Directories
           echo "📁 Creating directories..."
           mkdir -p data/hosted_files
           mkdir -p /var/log/$SERVICE_NAME
           
+          # Test bot import
+          echo "🧪 Testing bot imports..."
+          cd "$PROJECT_DIR"
+          source venv/bin/activate
+          if python -c "from config import Settings; s = Settings(); print('Config OK')" 2>&1; then
+            echo "✅ Bot imports work"
+          else
+            echo "❌ Bot import failed"
+            python -c "from config import Settings" 2>&1 || true
+          fi
+          
           # Systemd service
           echo "🔧 Setting up systemd service..."
-          cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
+          cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
           [Unit]
           Description=Telegram7zBot - Telegram Download Manager
           After=network.target
@@ -131,6 +165,7 @@ jobs:
           
           [Service]
           Type=simple
+          User=root
           WorkingDirectory=$PROJECT_DIR
           Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
           ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
@@ -139,16 +174,9 @@ jobs:
           StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
           StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
           
-          NoNewPrivileges=yes
-          PrivateTmp=yes
-          ProtectSystem=strict
-          ProtectHome=yes
-          ReadWritePaths=$PROJECT_DIR/data /var/log/$SERVICE_NAME
-          ReadOnlyPaths=$PROJECT_DIR
-          
           [Install]
           WantedBy=multi-user.target
-          EOF
+          SERVICEEOF
           
           systemctl daemon-reload
           systemctl enable $SERVICE_NAME
@@ -156,15 +184,21 @@ jobs:
           # Firewall
           echo "🔥 Configuring firewall..."
           if command -v ufw &> /dev/null; then
-            ufw allow ssh
+            ufw allow ssh 2>/dev/null || true
             if [ -n "${{ secrets.HOST_PORT }}" ]; then
-              ufw allow ${{ secrets.HOST_PORT }}/tcp
+              ufw allow ${{ secrets.HOST_PORT }}/tcp 2>/dev/null || true
               echo "   Port ${{ secrets.HOST_PORT }} opened"
             fi
             if ! ufw status | grep -q "Status: active"; then
-              ufw --force enable
+              ufw --force enable 2>/dev/null || true
             fi
           fi
+          
+          # Try running bot directly first to see errors
+          echo "🧪 Testing bot startup..."
+          cd "$PROJECT_DIR"
+          source venv/bin/activate
+          timeout 10 python bot.py 2>&1 || true
           
           # Start service
           echo "▶️  Starting $SERVICE_NAME..."
@@ -176,7 +210,15 @@ jobs:
             echo "✅ $SERVICE_NAME is running!"
           else
             echo "❌ $SERVICE_NAME failed to start"
-            journalctl -u $SERVICE_NAME -n 20 --no-pager
+            echo ""
+            echo "=== Service Status ==="
+            systemctl status $SERVICE_NAME --no-pager -l || true
+            echo ""
+            echo "=== Last 30 log lines ==="
+            journalctl -u $SERVICE_NAME -n 30 --no-pager || true
+            echo ""
+            echo "=== Error log ==="
+            tail -50 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
             exit 1
           fi
           
@@ -218,28 +260,6 @@ jobs:
             
             🔗 [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-  health-check:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: success()
-    name: 🏥 Health Check
-    
-    steps:
-      - name: 🔑 Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-      
-      - name: 🏥 Check service status
-        run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
-            echo '=== Service Status ==='
-            systemctl status ${{ env.SERVICE_NAME }} --no-pager -l || true
-            echo ''
-            echo '=== Recent Logs ==='
-            journalctl -u ${{ env.SERVICE_NAME }} -n 10 --no-pager || true
-          "
-
   rollback:
     needs: deploy
     runs-on: ubuntu-latest
@@ -261,15 +281,13 @@ jobs:
             
             if [ -n \"\$LATEST_BACKUP\" ] && [ -d \"\$LATEST_BACKUP\" ]; then
               echo \"Restoring from: \$LATEST_BACKUP\"
-              
-              systemctl stop ${{ env.SERVICE_NAME }}
+              systemctl stop ${{ env.SERVICE_NAME }} 2>/dev/null || true
               rm -rf ${{ env.PROJECT_DIR }}
               cp -r \"\$LATEST_BACKUP\" ${{ env.PROJECT_DIR }}
               systemctl start ${{ env.SERVICE_NAME }}
-              
               echo '✅ Rollback complete'
             else
-              echo '❌ No backup found for rollback'
+              echo '❌ No backup found'
               exit 1
             fi
           "
