@@ -3,13 +3,14 @@ name: Deploy Telegram7zBot to VPS
 on:
   push:
     branches:
+      - main
       - master
   workflow_dispatch:
     inputs:
       branch:
         description: 'Branch to deploy'
         required: false
-        default: 'master'
+        default: 'main'
 
 env:
   PROJECT_DIR: /opt/Telegram7zBot
@@ -51,10 +52,6 @@ jobs:
           echo "========================================"
           echo "  Telegram7zBot Deployment"
           echo "========================================"
-          echo "📦 Project: $REPO_URL"
-          echo "🌿 Branch: $BRANCH"
-          echo "📁 Directory: $PROJECT_DIR"
-          echo "========================================"
           
           # Stop service
           if systemctl is-active --quiet $SERVICE_NAME 2>/dev/null; then
@@ -87,96 +84,107 @@ jobs:
           
           cd "$PROJECT_DIR"
           
-          # Show current git status
-          echo "📋 Git status:"
-          git log --oneline -3
-          
           # System dependencies
           echo "📦 Installing system dependencies..."
           apt-get update -qq
           apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2 curl
           
-          # Python environment
+          # Create log directory
+          mkdir -p /var/log/$SERVICE_NAME
+          
+          # Python environment - fresh install
           echo "🐍 Setting up Python environment..."
           rm -rf venv
           python3 -m venv venv
-          source venv/bin/activate
           
+          # Install packages
           echo "📦 Installing Python packages..."
-          pip install --upgrade pip -q
-          pip install -r requirements.txt
+          $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
+          $PROJECT_DIR/venv/bin/pip install -r $PROJECT_DIR/requirements.txt
           
           # Verify installation
-          echo "✅ Verifying Python packages..."
-          python -c "import telegram; print('telegram:', telegram.__version__)"
-          python -c "import aiohttp; print('aiohttp:', aiohttp.__version__)"
-          python -c "from dotenv import load_dotenv; print('dotenv: OK')"
+          echo "✅ Verifying packages..."
+          $PROJECT_DIR/venv/bin/python -c "import telegram; print('telegram:', telegram.__version__)" || echo "❌ telegram missing"
+          $PROJECT_DIR/venv/bin/python -c "import aiohttp; print('aiohttp:', aiohttp.__version__)" || echo "❌ aiohttp missing"
           
-          # Configure .env
-          echo "⚙️  Configuring environment..."
+          # Configure .env with proper values
+          echo "⚙️  Configuring .env..."
           cat > .env << ENVEOF
-          BOT_TOKEN=${{ secrets.BOT_TOKEN }}
-          API_BASE_URL=${{ secrets.API_BASE_URL }}
-          API_BASE_FILE_URL=${{ secrets.API_BASE_FILE_URL }}
-          HOST_BASE_URL=${{ secrets.HOST_BASE_URL }}
-          HOST_PORT=${{ secrets.HOST_PORT }}
-          STORE_TIME_HOURS=${{ secrets.STORE_TIME_HOURS }}
-          MAX_TELEGRAM_SIZE_MB=${{ secrets.MAX_TELEGRAM_SIZE_MB }}
-          DOWNLOAD_METHOD=${{ secrets.DOWNLOAD_METHOD }}
-          ARIA2_RPC_URL=${{ secrets.ARIA2_RPC_URL }}
-          ARIA2_SECRET=${{ secrets.ARIA2_SECRET }}
-          WHITELIST=${{ secrets.WHITELIST }}
-          ADMIN_IDS=${{ secrets.ADMIN_IDS }}
-          ENVEOF
+BOT_TOKEN=${{ secrets.BOT_TOKEN }}
+API_BASE_URL=${{ secrets.API_BASE_URL }}
+API_BASE_FILE_URL=${{ secrets.API_BASE_FILE_URL }}
+HOST_BASE_URL=${{ secrets.HOST_BASE_URL }}
+HOST_PORT=${{ secrets.HOST_PORT }}
+STORE_TIME_HOURS=${{ secrets.STORE_TIME_HOURS }}
+MAX_TELEGRAM_SIZE_MB=${{ secrets.MAX_TELEGRAM_SIZE_MB }}
+DOWNLOAD_METHOD=${{ secrets.DOWNLOAD_METHOD }}
+ARIA2_RPC_URL=${{ secrets.ARIA2_RPC_URL }}
+ARIA2_SECRET=${{ secrets.ARIA2_SECRET }}
+WHITELIST=${{ secrets.WHITELIST }}
+ADMIN_IDS=${{ secrets.ADMIN_IDS }}
+ENVEOF
+          
+          # Clean .env - remove spaces around =
+          sed -i 's/ = /=/g' .env
+          sed -i 's/= /=/g' .env
           
           chmod 600 .env
           
           # Verify .env
-          echo "🔍 Checking .env..."
-          if grep -q "BOT_TOKEN=" .env && ! grep -q "BOT_TOKEN=$" .env && ! grep -q "BOT_TOKEN=your_bot_token_here" .env; then
-            echo "✅ BOT_TOKEN is set"
-          else
-            echo "⚠️  BOT_TOKEN may not be set correctly"
-          fi
+          echo "🔍 .env contents (masked):"
+          cat .env | while read line; do
+            key=$(echo "$line" | cut -d= -f1)
+            val=$(echo "$line" | cut -d= -f2-)
+            if [ -n "$val" ] && [ "$val" != "your_bot_token_here" ]; then
+              echo "$key=***set***"
+            else
+              echo "$key=(empty)"
+            fi
+          done
           
-          # Directories
+          # Create directories
           echo "📁 Creating directories..."
           mkdir -p data/hosted_files
           mkdir -p /var/log/$SERVICE_NAME
+          chmod 755 /var/log/$SERVICE_NAME
           
-          # Test bot import
-          echo "🧪 Testing bot imports..."
+          # Test bot
+          echo "🧪 Testing bot..."
           cd "$PROJECT_DIR"
-          source venv/bin/activate
-          if python -c "from config import Settings; s = Settings(); print('Config OK')" 2>&1; then
-            echo "✅ Bot imports work"
-          else
-            echo "❌ Bot import failed"
-            python -c "from config import Settings" 2>&1 || true
-          fi
+          timeout 10 $PROJECT_DIR/venv/bin/python -c "
+import sys
+sys.path.insert(0, '$PROJECT_DIR')
+try:
+    from config import Settings
+    s = Settings()
+    print('✅ Config loaded')
+    print('Token:', '***' if s.token else 'MISSING')
+except Exception as e:
+    print(f'❌ Config error: {e}')
+" 2>&1 || true
           
-          # Systemd service
+          # Systemd service - simplified, no strict protection
           echo "🔧 Setting up systemd service..."
           cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
-          [Unit]
-          Description=Telegram7zBot - Telegram Download Manager
-          After=network.target
-          Wants=network.target
-          
-          [Service]
-          Type=simple
-          User=root
-          WorkingDirectory=$PROJECT_DIR
-          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
-          ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
-          Restart=always
-          RestartSec=10
-          StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
-          StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
-          
-          [Install]
-          WantedBy=multi-user.target
-          SERVICEEOF
+[Unit]
+Description=Telegram7zBot - Telegram Download Manager
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$PROJECT_DIR
+Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
+StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
           
           systemctl daemon-reload
           systemctl enable $SERVICE_NAME
@@ -187,23 +195,12 @@ jobs:
             ufw allow ssh 2>/dev/null || true
             if [ -n "${{ secrets.HOST_PORT }}" ]; then
               ufw allow ${{ secrets.HOST_PORT }}/tcp 2>/dev/null || true
-              echo "   Port ${{ secrets.HOST_PORT }} opened"
-            fi
-            if ! ufw status | grep -q "Status: active"; then
-              ufw --force enable 2>/dev/null || true
             fi
           fi
-          
-          # Try running bot directly first to see errors
-          echo "🧪 Testing bot startup..."
-          cd "$PROJECT_DIR"
-          source venv/bin/activate
-          timeout 10 python bot.py 2>&1 || true
           
           # Start service
           echo "▶️  Starting $SERVICE_NAME..."
           systemctl start $SERVICE_NAME
-          
           sleep 5
           
           if systemctl is-active --quiet $SERVICE_NAME; then
@@ -211,14 +208,11 @@ jobs:
           else
             echo "❌ $SERVICE_NAME failed to start"
             echo ""
-            echo "=== Service Status ==="
-            systemctl status $SERVICE_NAME --no-pager -l || true
+            echo "=== Error Log ==="
+            tail -30 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
             echo ""
-            echo "=== Last 30 log lines ==="
-            journalctl -u $SERVICE_NAME -n 30 --no-pager || true
-            echo ""
-            echo "=== Error log ==="
-            tail -50 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
+            echo "=== Journal ==="
+            journalctl -u $SERVICE_NAME -n 20 --no-pager || true
             exit 1
           fi
           
@@ -226,7 +220,6 @@ jobs:
           echo "========================================"
           echo "  ✅ Deployment Complete!"
           echo "========================================"
-          echo ""
           
           ENDSSH
         env:
@@ -242,8 +235,6 @@ jobs:
             ✅ **Telegram7zBot Deployed!**
             
             🌿 Branch: ${{ env.BRANCH }}
-            📝 Commit: ${{ github.sha }}
-            👤 Author: ${{ github.actor }}
             🖥️ Server: ${{ secrets.VPS_HOST }}
       
       - name: ❌ Notify failure
@@ -253,11 +244,7 @@ jobs:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.BOT_TOKEN }}
           message: |
-            ❌ **Telegram7zBot Deployment Failed!**
-            
-            🌿 Branch: ${{ env.BRANCH }}
-            📝 Commit: ${{ github.sha }}
-            
+            ❌ **Deployment Failed!**
             🔗 [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
   rollback:
@@ -275,19 +262,12 @@ jobs:
       - name: 🔄 Execute rollback
         run: |
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
-            echo '🔄 Rolling back deployment...'
-            
             LATEST_BACKUP=\$(ls -dt ${{ env.PROJECT_DIR }}_backup_* 2>/dev/null | head -1)
-            
             if [ -n \"\$LATEST_BACKUP\" ] && [ -d \"\$LATEST_BACKUP\" ]; then
-              echo \"Restoring from: \$LATEST_BACKUP\"
               systemctl stop ${{ env.SERVICE_NAME }} 2>/dev/null || true
               rm -rf ${{ env.PROJECT_DIR }}
               cp -r \"\$LATEST_BACKUP\" ${{ env.PROJECT_DIR }}
               systemctl start ${{ env.SERVICE_NAME }}
               echo '✅ Rollback complete'
-            else
-              echo '❌ No backup found'
-              exit 1
             fi
           "
