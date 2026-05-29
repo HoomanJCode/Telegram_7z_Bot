@@ -1,4 +1,4 @@
-name: Deploy FileBot to VPS
+name: Deploy FileBot to VPS (Git Clone)
 
 on:
   push:
@@ -14,134 +14,194 @@ on:
 
 env:
   PROJECT_DIR: /opt/filebot
-  PYTHON_VERSION: '3.11'
+  REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+  BRANCH: ${{ github.event.inputs.branch || github.ref_name }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.branch || github.ref_name }}
-      
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
       
-      - name: Add VPS to known hosts
+      - name: Add VPS and GitHub to known hosts
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
       
-      - name: Create deployment package
+      - name: Deploy to VPS via Git Clone
         run: |
-          tar -czf deploy.tar.gz \
-            --exclude='.git' \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            --exclude='venv' \
-            --exclude='data/hosted_files/*' \
-            --exclude='*.log' \
-            --exclude='.env' \
-            .
-      
-      - name: Copy files to VPS
-        run: |
-          scp deploy.tar.gz ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy.tar.gz
-          scp deploy.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy.sh
-      
-      - name: Run deployment script
-        run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "bash /tmp/deploy.sh"
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << 'ENDSSH'
+          
+          # Configuration
+          PROJECT_DIR="/opt/filebot"
+          BRANCH="${{ env.BRANCH }}"
+          REPO_URL="${{ env.REPO_URL }}"
+          
+          echo "🚀 Starting deployment..."
+          echo "📦 Project: $REPO_URL"
+          echo "🌿 Branch: $BRANCH"
+          
+          # Stop service
+          if systemctl is-active --quiet filebot; then
+            echo "⏹️  Stopping FileBot service..."
+            systemctl stop filebot
+          fi
+          
+          # Backup existing installation
+          if [ -d "$PROJECT_DIR" ]; then
+            echo "💾 Creating backup..."
+            BACKUP_DIR="${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
+            cp -r "$PROJECT_DIR" "$BACKUP_DIR"
+            echo "Backup saved to: $BACKUP_DIR"
+            
+            # Keep only last 3 backups
+            ls -dt ${PROJECT_DIR}_backup_* | tail -n +4 | xargs -r rm -rf
+          fi
+          
+          # Clone or pull repository
+          if [ -d "$PROJECT_DIR/.git" ]; then
+            echo "📥 Pulling latest changes..."
+            cd "$PROJECT_DIR"
+            git fetch origin
+            git reset --hard origin/$BRANCH
+          else
+            echo "📥 Cloning repository..."
+            rm -rf "$PROJECT_DIR"
+            git clone --branch $BRANCH --single-branch $REPO_URL "$PROJECT_DIR"
+          fi
+          
+          cd "$PROJECT_DIR"
+          
+          # Install system dependencies
+          echo "📦 Installing system dependencies..."
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2
+          
+          # Setup virtual environment
+          echo "🐍 Setting up Python environment..."
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          
+          # Create .env file
+          echo "⚙️  Creating .env configuration..."
+          cat > .env << EOF
+          BOT_TOKEN=${{ secrets.BOT_TOKEN }}
+          API_BASE_URL=${{ secrets.API_BASE_URL }}
+          API_BASE_FILE_URL=${{ secrets.API_BASE_FILE_URL }}
+          HOST_BASE_URL=${{ secrets.HOST_BASE_URL }}
+          HOST_PORT=${{ secrets.HOST_PORT }}
+          STORE_TIME_HOURS=${{ secrets.STORE_TIME_HOURS }}
+          MAX_TELEGRAM_SIZE_MB=${{ secrets.MAX_TELEGRAM_SIZE_MB }}
+          DOWNLOAD_METHOD=${{ secrets.DOWNLOAD_METHOD }}
+          ARIA2_RPC_URL=${{ secrets.ARIA2_RPC_URL }}
+          ARIA2_SECRET=${{ secrets.ARIA2_SECRET }}
+          WHITELIST=${{ secrets.WHITELIST }}
+          ADMIN_IDS=${{ secrets.ADMIN_IDS }}
+          EOF
+          
+          chmod 600 .env
+          
+          # Create directories
+          mkdir -p data/hosted_files
+          mkdir -p /var/log/filebot
+          
+          # Setup systemd service
+          echo "🔧 Setting up systemd service..."
+          cat > /etc/systemd/system/filebot.service << EOF
+          [Unit]
+          Description=FileBot Telegram Bot
+          After=network.target
+          
+          [Service]
+          Type=simple
+          WorkingDirectory=$PROJECT_DIR
+          ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
+          Restart=always
+          RestartSec=10
+          StandardOutput=append:/var/log/filebot/bot.log
+          StandardError=append:/var/log/filebot/bot_error.log
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl enable filebot
+          
+          # Configure firewall
+          echo "🔥 Configuring firewall..."
+          if command -v ufw &> /dev/null; then
+            ufw allow ssh
+            if [ -n "${{ secrets.HOST_PORT }}" ]; then
+              ufw allow ${{ secrets.HOST_PORT }}/tcp
+            fi
+            if ! ufw status | grep -q "Status: active"; then
+              ufw --force enable
+            fi
+          fi
+          
+          # Start service
+          echo "▶️  Starting FileBot service..."
+          systemctl start filebot
+          
+          # Check status
+          sleep 5
+          if systemctl is-active --quiet filebot; then
+            echo "✅ FileBot is running!"
+          else
+            echo "❌ FileBot failed to start"
+            journalctl -u filebot -n 20 --no-pager
+            exit 1
+          fi
+          
+          # Health check
+          if [ -n "${{ secrets.HOST_BASE_URL }}" ]; then
+            sleep 3
+            if curl -sf ${{ secrets.HOST_BASE_URL }}/health > /dev/null 2>&1; then
+              echo "✅ Web server is healthy"
+            else
+              echo "⚠️  Web server health check failed"
+            fi
+          fi
+          
+          echo "🎉 Deployment completed!"
+          
+          ENDSSH
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          API_BASE_URL: ${{ secrets.API_BASE_URL }}
-          API_BASE_FILE_URL: ${{ secrets.API_BASE_FILE_URL }}
-          HOST_BASE_URL: ${{ secrets.HOST_BASE_URL }}
-          HOST_PORT: ${{ secrets.HOST_PORT }}
-          STORE_TIME_HOURS: ${{ secrets.STORE_TIME_HOURS }}
-          MAX_TELEGRAM_SIZE_MB: ${{ secrets.MAX_TELEGRAM_SIZE_MB }}
-          DOWNLOAD_METHOD: ${{ secrets.DOWNLOAD_METHOD }}
-          ARIA2_RPC_URL: ${{ secrets.ARIA2_RPC_URL }}
-          ARIA2_SECRET: ${{ secrets.ARIA2_SECRET }}
-          WHITELIST: ${{ secrets.WHITELIST }}
-          ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
       
-      - name: Verify deployment
-        run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "systemctl status filebot --no-pager || echo 'Service status check failed'"
-      
-      - name: Cleanup
-        if: always()
-        run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "rm -f /tmp/deploy.tar.gz /tmp/deploy.sh"
-
-  health-check:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: success()
-    
-    steps:
-      - name: Check web server
-        if: ${{ secrets.HOST_BASE_URL != '' }}
-        run: |
-          sleep 10
-          curl -f ${{ secrets.HOST_BASE_URL }}/health || echo "Health check failed"
-      
-      - name: Notify on failure
-        if: failure()
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          token: ${{ secrets.BOT_TOKEN }}
-          message: |
-            ⚠️ FileBot Deployment Failed!
-            
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Author: ${{ github.actor }}
-            
-            Check GitHub Actions for details:
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      
-      - name: Notify on success
+      - name: Notify success
         if: success()
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.BOT_TOKEN }}
           message: |
-            ✅ FileBot Deployed Successfully!
+            ✅ **FileBot Deployed Successfully!**
             
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Author: ${{ github.actor }}
-
-  rollback:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: failure()
-    
-    steps:
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+            🌿 Branch: `${{ env.BRANCH }}`
+            📝 Commit: `${{ github.sha }}`
+            👤 Author: ${{ github.actor }}
+            
+            🖥️ Server: ${{ secrets.VPS_HOST }}
       
-      - name: Rollback deployment
-        run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "
-            if [ -d ${{ env.PROJECT_DIR }}/backup ]; then
-              echo 'Rolling back to backup...'
-              systemctl stop filebot
-              rm -rf ${{ env.PROJECT_DIR }}/*
-              cp -r ${{ env.PROJECT_DIR }}/backup/* ${{ env.PROJECT_DIR }}/
-              systemctl start filebot
-              echo 'Rollback complete'
-            else
-              echo 'No backup found, skipping rollback'
-            fi
-          "
+      - name: Notify failure
+        if: failure()
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.BOT_TOKEN }}
+          message: |
+            ❌ **FileBot Deployment Failed!**
+            
+            🌿 Branch: `${{ env.BRANCH }}`
+            📝 Commit: `${{ github.sha }}`
+            
+            🔗 [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
