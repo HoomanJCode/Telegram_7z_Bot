@@ -40,83 +40,73 @@ jobs:
           ADMIN_IDS: ${{ secrets.ADMIN_IDS || '' }}
           WHITELIST: ${{ secrets.WHITELIST || '' }}
         run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s << ENDSSH
+          # Create deployment script locally
+          cat > /tmp/deploy_script.sh << 'SCRIPTEOF'
+          #!/bin/bash
           set -e
           
-          PROJECT_DIR="${PROJECT_DIR:-${{ env.PROJECT_DIR }}}"
-          SERVICE_NAME="${SERVICE_NAME:-${{ env.SERVICE_NAME }}}"
+          PROJECT_DIR="PROJECT_DIR_PLACEHOLDER"
+          SERVICE_NAME="SERVICE_NAME_PLACEHOLDER"
           
           echo "========================================"
           echo "  Telegram7zBot Deployment"
           echo "========================================"
           
-          # Stop service
-          systemctl stop \$SERVICE_NAME 2>/dev/null || true
+          systemctl stop $SERVICE_NAME 2>/dev/null || true
           sleep 2
           
-          # System dependencies
           echo "📦 Installing dependencies..."
           apt-get update -qq
           apt-get install -y -qq python3 python3-pip python3-venv p7zip-full aria2 curl git
           
-          # Create directories
-          mkdir -p /var/log/\$SERVICE_NAME
+          mkdir -p /var/log/$SERVICE_NAME
           
-          # Clone/Pull
-          if [ -d "\$PROJECT_DIR/.git" ]; then
+          if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest code..."
-            cd "\$PROJECT_DIR"
+            cd "$PROJECT_DIR"
             git fetch origin
             git reset --hard origin/master
             git clean -fd
           else
             echo "📥 Cloning repository..."
-            rm -rf "\$PROJECT_DIR"
-            git clone --branch master https://github.com/HoomanJCode/Telegram7zBot.git "\$PROJECT_DIR"
-            cd "\$PROJECT_DIR"
+            rm -rf "$PROJECT_DIR"
+            git clone --branch master https://github.com/HoomanJCode/Telegram7zBot.git "$PROJECT_DIR"
+            cd "$PROJECT_DIR"
           fi
           
-          # Create .env with proper values
           echo "⚙️  Creating .env file..."
-          cat > "\$PROJECT_DIR/.env" << 'EOF'
-BOT_TOKEN=${BOT_TOKEN}
-API_BASE_URL=
-API_BASE_FILE_URL=
-HOST_BASE_URL=${HOST_BASE_URL}
-HOST_PORT=${HOST_PORT}
-STORE_TIME_HOURS=${STORE_TIME_HOURS}
-MAX_TELEGRAM_SIZE_MB=${MAX_TELEGRAM_SIZE_MB}
-DOWNLOAD_METHOD=${DOWNLOAD_METHOD}
-ARIA2_RPC_URL=http://localhost:6800/jsonrpc
-ARIA2_SECRET=
-WHITELIST=${WHITELIST}
-ADMIN_IDS=${ADMIN_IDS}
-EOF
+          echo "BOT_TOKEN=BOT_TOKEN_PLACEHOLDER" > "$PROJECT_DIR/.env"
+          echo "API_BASE_URL=" >> "$PROJECT_DIR/.env"
+          echo "API_BASE_FILE_URL=" >> "$PROJECT_DIR/.env"
+          echo "HOST_BASE_URL=HOST_BASE_URL_PLACEHOLDER" >> "$PROJECT_DIR/.env"
+          echo "HOST_PORT=HOST_PORT_PLACEHOLDER" >> "$PROJECT_DIR/.env"
+          echo "STORE_TIME_HOURS=STORE_TIME_HOURS_PLACEHOLDER" >> "$PROJECT_DIR/.env"
+          echo "MAX_TELEGRAM_SIZE_MB=MAX_TELEGRAM_SIZE_MB_PLACEHOLDER" >> "$PROJECT_DIR/.env"
+          echo "DOWNLOAD_METHOD=DOWNLOAD_METHOD_PLACEHOLDER" >> "$PROJECT_DIR/.env"
+          echo "ARIA2_RPC_URL=http://localhost:6800/jsonrpc" >> "$PROJECT_DIR/.env"
+          echo "ARIA2_SECRET=" >> "$PROJECT_DIR/.env"
+          echo "WHITELIST=WHITELIST_PLACEHOLDER" >> "$PROJECT_DIR/.env"
+          echo "ADMIN_IDS=ADMIN_IDS_PLACEHOLDER" >> "$PROJECT_DIR/.env"
           
-          chmod 600 "\$PROJECT_DIR/.env"
+          chmod 600 "$PROJECT_DIR/.env"
           
-          # Verify .env
-          echo "🔍 Checking .env..."
-          if grep -q "^BOT_TOKEN=\$" "\$PROJECT_DIR/.env"; then
+          if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env"; then
             echo "❌ ERROR: BOT_TOKEN is empty!"
             exit 1
           fi
           
-          # Python venv
           echo "🐍 Setting up Python..."
-          cd "\$PROJECT_DIR"
+          cd "$PROJECT_DIR"
           rm -rf venv
           python3 -m venv venv
-          \$PROJECT_DIR/venv/bin/pip install --upgrade pip -q
-          \$PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
+          $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
+          $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
           
-          # Create data dir
-          mkdir -p "\$PROJECT_DIR/data/hosted_files"
+          mkdir -p "$PROJECT_DIR/data/hosted_files"
           
-          # Test config
           echo "🧪 Testing configuration..."
-          \$PROJECT_DIR/venv/bin/python -c "
-          import sys; sys.path.insert(0, '\$PROJECT_DIR')
+          $PROJECT_DIR/venv/bin/python -c "
+          import sys; sys.path.insert(0, '$PROJECT_DIR')
           from config import Settings
           s = Settings()
           print('Token:', 'SET' if s.token else 'MISSING')
@@ -124,9 +114,8 @@ EOF
           print('Storage:', s.store_time_hours)
           " 2>&1
           
-          # Systemd service
           echo "🔧 Creating service..."
-          cat > /etc/systemd/system/\$SERVICE_NAME.service << SERVICEEOF
+          cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
           [Unit]
           Description=Telegram7zBot
           After=network.target
@@ -134,39 +123,54 @@ EOF
           [Service]
           Type=simple
           User=root
-          WorkingDirectory=\$PROJECT_DIR
-          ExecStart=\$PROJECT_DIR/venv/bin/python \$PROJECT_DIR/bot.py
+          WorkingDirectory=$PROJECT_DIR
+          ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
           Restart=on-failure
           RestartSec=10
-          StandardOutput=append:/var/log/\$SERVICE_NAME/bot.log
-          StandardError=append:/var/log/\$SERVICE_NAME/bot_error.log
+          StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
+          StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
           
           [Install]
           WantedBy=multi-user.target
           SERVICEEOF
           
           systemctl daemon-reload
-          systemctl enable \$SERVICE_NAME
+          systemctl enable $SERVICE_NAME
           
-          # Start
           echo "▶️  Starting service..."
-          systemctl start \$SERVICE_NAME
+          systemctl start $SERVICE_NAME
           sleep 5
           
-          if systemctl is-active --quiet \$SERVICE_NAME; then
+          if systemctl is-active --quiet $SERVICE_NAME; then
             echo "✅ Service is running!"
-            systemctl status \$SERVICE_NAME --no-pager -l
+            systemctl status $SERVICE_NAME --no-pager -l
           else
             echo "❌ Service failed!"
             echo "=== Error Log ==="
-            tail -20 /var/log/\$SERVICE_NAME/bot_error.log 2>/dev/null || true
+            tail -20 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
             echo "=== Journal ==="
-            journalctl -u \$SERVICE_NAME -n 10 --no-pager || true
+            journalctl -u $SERVICE_NAME -n 10 --no-pager || true
             exit 1
           fi
           
           echo "✅ Deployment Complete!"
-          ENDSSH
+          SCRIPTEOF
+          
+          # Replace placeholders with actual values
+          sed -i "s|PROJECT_DIR_PLACEHOLDER|${{ env.PROJECT_DIR }}|g" /tmp/deploy_script.sh
+          sed -i "s|SERVICE_NAME_PLACEHOLDER|${{ env.SERVICE_NAME }}|g" /tmp/deploy_script.sh
+          sed -i "s|BOT_TOKEN_PLACEHOLDER|${BOT_TOKEN}|g" /tmp/deploy_script.sh
+          sed -i "s|HOST_BASE_URL_PLACEHOLDER|${HOST_BASE_URL}|g" /tmp/deploy_script.sh
+          sed -i "s|HOST_PORT_PLACEHOLDER|${HOST_PORT}|g" /tmp/deploy_script.sh
+          sed -i "s|STORE_TIME_HOURS_PLACEHOLDER|${STORE_TIME_HOURS}|g" /tmp/deploy_script.sh
+          sed -i "s|MAX_TELEGRAM_SIZE_MB_PLACEHOLDER|${MAX_TELEGRAM_SIZE_MB}|g" /tmp/deploy_script.sh
+          sed -i "s|DOWNLOAD_METHOD_PLACEHOLDER|${DOWNLOAD_METHOD}|g" /tmp/deploy_script.sh
+          sed -i "s|WHITELIST_PLACEHOLDER|${WHITELIST}|g" /tmp/deploy_script.sh
+          sed -i "s|ADMIN_IDS_PLACEHOLDER|${ADMIN_IDS}|g" /tmp/deploy_script.sh
+          
+          # Copy and execute on VPS
+          scp /tmp/deploy_script.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy_script.sh
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "bash /tmp/deploy_script.sh"
       
       - name: ✅ Success Notification
         if: success()
