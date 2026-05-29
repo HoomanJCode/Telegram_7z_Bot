@@ -20,9 +20,9 @@ from telegram.ext import (
     filters,
 )
 
-from config import Config
+from config import Settings
 from handlers.commands import (
-    start, set_password, my_password, bot_status,
+    start, set_password, my_password, bot_status, recent_files,
     set_host_url, set_store_time, whitelist_add, whitelist_remove
 )
 from handlers.messages import handle_document, handle_text
@@ -41,7 +41,7 @@ class FileBot:
     """Main bot application."""
     
     def __init__(self):
-        self.config = Config()
+        self.settings = Settings()
         self.file_manager = FileManager()
         self.web_server = None
         self._tasks = []
@@ -64,31 +64,36 @@ class FileBot:
         with open(DATA_DIR / "passwords.json", "w") as f:
             json.dump(self.passwords, f, indent=2)
     
-    def _validate_dependencies(self):
-        """Check required dependencies."""
-        if not self.config.token:
-            logger.error("Bot token not configured!")
-            print("❌ Please configure your bot token in config.json")
-            sys.exit(1)
-        
-        if self.config.download_method == "aria2":
-            if not DownloadManager.check_availability():
-                logger.warning("aria2 not found, switching to direct download")
-                self.config._config["download_method"] = "direct"
-                self.config._save_config()
-        
-        if not asyncio.get_event_loop().run_until_complete(SevenZipArchiver.check_availability()):
-            logger.error("7z not found!")
-            print("❌ Please install p7zip-full: sudo apt install p7zip-full")
-            sys.exit(1)
+    def _check_env_file(self):
+        """Check if .env file exists, create if not."""
+        env_path = Path(".env")
+        if not env_path.exists():
+            logger.info("Creating .env file from example...")
+            example_path = Path(".env.example")
+            if example_path.exists():
+                import shutil
+                shutil.copy(example_path, env_path)
+                print("\n⚠️  .env file created from .env.example")
+                print("⚠️  Please edit .env with your settings, especially BOT_TOKEN")
+                print("⚠️  Then run the bot again.\n")
+                sys.exit(0)
+            else:
+                # Create minimal .env
+                with open(env_path, "w") as f:
+                    f.write("BOT_TOKEN=\n")
+                print("\n⚠️  .env file created. Please add your BOT_TOKEN and run again.\n")
+                sys.exit(0)
     
     def _register_handlers(self, app: Application):
         """Register all bot handlers."""
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("help", start))
+        app.add_handler(CommandHandler("recent", recent_files))
+        app.add_handler(CommandHandler("files", recent_files))
         app.add_handler(CommandHandler("setpassword", set_password))
         app.add_handler(CommandHandler("mypassword", my_password))
         app.add_handler(CommandHandler("status", bot_status))
+        app.add_handler(CommandHandler("config", bot_status))
         app.add_handler(CommandHandler("sethosturl", set_host_url))
         app.add_handler(CommandHandler("setstoretime", set_store_time))
         app.add_handler(CommandHandler("wladd", whitelist_add))
@@ -108,7 +113,7 @@ class FileBot:
         while True:
             try:
                 await asyncio.sleep(3600)
-                await self.file_manager.cleanup_expired(self.config.store_time_hours)
+                await self.file_manager.cleanup_expired(self.settings.store_time_hours)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -116,35 +121,53 @@ class FileBot:
     
     async def start(self):
         """Initialize and start the bot."""
-        # Validate dependencies
-        if not self.config.token:
-            logger.error("Bot token not configured!")
-            print("❌ Please configure your bot token in config.json")
+        # Check .env file
+        self._check_env_file()
+        
+        # Validate settings
+        errors = self.settings.validate()
+        if errors:
+            print("\n❌ Configuration errors:")
+            for error in errors:
+                print(f"  • {error}")
+            print("\nPlease fix .env file and run again.\n")
             sys.exit(1)
         
-        if self.config.download_method == "aria2":
+        # Validate token
+        if not self.settings.token:
+            logger.error("Bot token not configured!")
+            print("❌ Please set BOT_TOKEN in .env file")
+            sys.exit(1)
+        
+        # Check dependencies
+        if self.settings.download_method == "aria2":
             if not DownloadManager.check_availability():
                 logger.warning("aria2 not found, switching to direct download")
-                self.config._config["download_method"] = "direct"
-                self.config._save_config()
+                self.settings.download_method = "direct"
         
         if not await SevenZipArchiver.check_availability():
             logger.error("7z not found!")
             print("❌ Please install p7zip-full: sudo apt install p7zip-full")
             sys.exit(1)
         
-        # Build application
-        builder = ApplicationBuilder().token(self.config.token)
+        # Display config
+        print("\n" + "="*50)
+        print(self.settings.display())
+        print("="*50 + "\n")
         
-        if self.config.api_base_url:
-            builder.base_url(self.config.api_base_url)
-            if self.config.api_base_file_url:
-                builder.base_file_url(self.config.api_base_file_url)
+        # Build application
+        builder = ApplicationBuilder().token(self.settings.token)
+        
+        if self.settings.api_base_url:
+            builder.base_url(self.settings.api_base_url)
+            if self.settings.api_base_file_url:
+                builder.base_file_url(self.settings.api_base_file_url)
         
         app = builder.build()
         
         # Store references
-        app.bot_data["config"] = self.config
+        app.bot_data["settings"] = self.settings
+        app.bot_data["config"] = self.settings  # For backward compatibility
         app.bot_data["passwords"] = self.passwords
         app.bot_data["file_manager"] = self.file_manager
         
@@ -152,8 +175,8 @@ class FileBot:
         self._register_handlers(app)
         
         # Start web server if configured
-        if self.config.is_host_enabled:
-            self.web_server = WebServer("0.0.0.0", self.config.host_port)
+        if self.settings.is_host_enabled:
+            self.web_server = WebServer("0.0.0.0", self.settings.host_port)
             await self.web_server.start()
         
         # Start cleanup task
@@ -170,7 +193,6 @@ class FileBot:
         
         self._app = app
         
-        # Keep running
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -180,11 +202,9 @@ class FileBot:
         """Graceful shutdown."""
         logger.info("Shutting down...")
         
-        # Stop web server
         if self.web_server:
             await self.web_server.stop()
         
-        # Cancel tasks
         for task in self._tasks:
             if not task.done():
                 task.cancel()
@@ -193,7 +213,6 @@ class FileBot:
                 except asyncio.CancelledError:
                     pass
         
-        # Stop bot
         if hasattr(self, '_app'):
             try:
                 await self._app.updater.stop()

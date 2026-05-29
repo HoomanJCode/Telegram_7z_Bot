@@ -1,0 +1,2 @@
+mkdir -p data/hosted_files
+touch data/hosted_files/.gitkeep

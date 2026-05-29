@@ -144,3 +144,12 @@ passwords.json
 *.secret
 *.key
 *.pem
+
+# Data
+data/hosted_files/*
+!data/hosted_files/.gitkeep
+data/passwords.json
+
+# Logs
+*.log
+bot.log
