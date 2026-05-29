@@ -69,7 +69,7 @@ class FileBot:
         env_path = Path(".env")
         if not env_path.exists():
             logger.info("Creating .env file from example...")
-            example_path = Path(".env.example")
+            example_path = Path("env.example")
             if example_path.exists():
                 import shutil
                 shutil.copy(example_path, env_path)
