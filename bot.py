@@ -1,3 +1,4 @@
+# Line 1-30 of bot.py
 #!/usr/bin/env python3
 """
 FileBot - Telegram Bot for File Download & Management
@@ -26,7 +27,7 @@ from handlers.commands import (
     set_host_url, set_store_time, whitelist_add, whitelist_remove
 )
 from handlers.messages import handle_document, handle_text
-from handlers import handle_callback
+from handlers.callbacks import handle_callback
 from services.web_server import WebServer
 from core.file_manager import FileManager
 from core.archiver import SevenZipArchiver

@@ -5,8 +5,25 @@ from typing import List, Optional
 
 def extract_urls(text: str) -> List[str]:
     """Extract unique URLs from text."""
-    urls = re.findall(r'https?://\S+', text)
-    return list(set(urls))
+    urls = re.findall(r'https?://[^\s\n\r,;]+', text)
+    # Clean up URLs (remove trailing punctuation)
+    cleaned = []
+    for url in urls:
+        url = url.rstrip('.,;:!?)]}')
+        if url not in cleaned:
+            cleaned.append(url)
+    return cleaned
+
+def extract_urls_from_file(file_path: str) -> List[str]:
+    """Extract URLs from a file."""
+    urls = []
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+            urls = extract_urls(content)
+    except Exception:
+        pass
+    return urls
 
 def sanitize_filename(filename: str) -> str:
     """Remove invalid characters from filename."""
@@ -29,19 +46,19 @@ def format_file_size(size_bytes: int) -> str:
 def format_time(seconds: int) -> str:
     """Format time duration in human readable format."""
     if seconds < 60:
-        return f"{seconds} seconds"
+        return f"{seconds}s"
     elif seconds < 3600:
-        return f"{seconds // 60} minutes"
+        return f"{seconds // 60}m"
     elif seconds < 86400:
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        return f"{hours}h {minutes}m"
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}h {m}m"
     else:
-        days = seconds // 86400
-        hours = (seconds % 86400) // 3600
-        if hours == 0:
-            return f"{days} day(s)"
-        return f"{days} day(s) {hours}h"
+        d = seconds // 86400
+        h = (seconds % 86400) // 3600
+        if h == 0:
+            return f"{d}d"
+        return f"{d}d {h}h"
 
 def mask_string(text: str, visible_chars: int = 2) -> str:
     """Mask a string showing only first and last characters."""
