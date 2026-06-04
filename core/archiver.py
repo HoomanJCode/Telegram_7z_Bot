@@ -43,9 +43,9 @@ class SevenZipArchiver:
         total_files = len(files)
         total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
         
-        # Send initial progress message
+        # FORCE immediate update before starting
         if progress_callback:
-            await progress_callback(f"📦 Compressing {total_files} file(s) ({_format_size(total_size)})...")
+            await progress_callback(f"📦 Compressing {total_files} file(s) ({_format_size(total_size)})...", force=True)
         
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -75,9 +75,10 @@ class SevenZipArchiver:
         if process.returncode != 0:
             raise RuntimeError("7z compression failed")
         
+        # FORCE immediate update when done
         if progress_callback:
             output_size = os.path.getsize(output_path)
-            await progress_callback(f"📦 Compressed: {_format_size(output_size)}")
+            await progress_callback(f"📦 Compressed: {_format_size(output_size)}", force=True)
         
         return output_path
     
@@ -100,9 +101,9 @@ class SevenZipArchiver:
         total_files = len(files)
         total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
         
-        # Send initial progress message
+        # FORCE immediate update before starting
         if progress_callback:
-            await progress_callback(f"📦 Splitting {total_files} file(s) ({_format_size(total_size)})...")
+            await progress_callback(f"📦 Splitting {total_files} file(s) ({_format_size(total_size)})...", force=True)
         
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -141,9 +142,10 @@ class SevenZipArchiver:
             key=lambda p: p.name
         )
         
+        # FORCE immediate update when done
         if progress_callback:
             total_output = sum(os.path.getsize(v) for v in volumes)
-            await progress_callback(f"📦 Split into {len(volumes)} parts ({_format_size(total_output)})")
+            await progress_callback(f"📦 Split into {len(volumes)} parts ({_format_size(total_output)})", force=True)
         
         return volumes
 
