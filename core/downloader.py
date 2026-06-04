@@ -40,7 +40,6 @@ class ProgressTracker:
                     f"📥 Downloading... {percent}%\n"
                     f"📏 {format_file_size(self.downloaded)} / {format_file_size(self.total_size)}"
                 )
-                # Don't use asyncio.create_task - call directly
                 self.callback(status)
 
 
@@ -88,6 +87,7 @@ class Aria2Downloader:
                 )
                 
                 if is_single:
+                    # Single file: parse progress
                     last_percent = 0
                     while True:
                         line = await process.stdout.readline()
@@ -117,16 +117,19 @@ class Aria2Downloader:
                             except Exception:
                                 pass
                 else:
-                    # For multiple files, just wait - no progress parsing
+                    # Multiple files: just wait, don't parse output
                     await process.wait()
-                    continue
                 
-                await process.wait()
+                # Wait for process to complete (for single files too)
+                if is_single:
+                    await process.wait()
                 
+                # Check result and collect files
                 if process.returncode == 0:
                     if progress_callback and is_single:
                         await progress_callback("✅ Download complete")
                     
+                    # Find new files in dest_dir
                     for file in os.listdir(dest_dir):
                         if file.endswith('.aria2'):
                             continue
