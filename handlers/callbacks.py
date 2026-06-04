@@ -25,7 +25,14 @@ TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024
 # Store active downloads for cancellation
 active_downloads = {}
 
-
+def _format_size(size_bytes: int) -> str:
+    """Format file size for display."""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} TB"
+    
 def get_settings(context: ContextTypes.DEFAULT_TYPE):
     """Get settings from bot_data."""
     return context.application.bot_data.get("settings") or context.application.bot_data.get("config")
@@ -365,7 +372,7 @@ async def _process_urls(update, context, urls, action, query, download_id):
     async def update_progress(message: str):
         nonlocal last_update
         now = time.time()
-        if now - last_update >= 3:
+        if now - last_update >= 2:  # More responsive for archiving
             last_update = now
             try:
                 await query.edit_message_text(
@@ -385,14 +392,7 @@ async def _process_urls(update, context, urls, action, query, download_id):
         await update_progress(f"📥 Downloading {len(urls)} file(s)...")
 
         downloader = DownloadManager(settings.download_method)
-
-        # Override progress callback to not show method name
-        async def simple_progress(msg: str):
-            # Remove any method-specific text
-            clean_msg = msg.replace("with aria2", "").replace("with direct", "").strip()
-            await update_progress(clean_msg)
-
-        files = await downloader.download(urls, temp_dir, simple_progress)
+        files = await downloader.download(urls, temp_dir, update_progress)
 
         if is_cancelled(download_id):
             await query.edit_message_text("🛑 Cancelled.")
@@ -407,10 +407,11 @@ async def _process_urls(update, context, urls, action, query, download_id):
         if len(files) > 3:
             names += f" +{len(files) - 3} more"
 
-        await update_progress(f"📦 Creating archive ({format_file_size(total_size)})...")
+        # Create archive WITH progress
+        await update_progress(f"📦 Compressing {len(files)} file(s) ({_format_size(total_size)})...")
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
-        await archiver.create_archive(files, archive_path, password)
+        await archiver.create_archive(files, archive_path, password, update_progress)
         archive_size = os.path.getsize(archive_path)
 
         if is_cancelled(download_id):
@@ -419,14 +420,16 @@ async def _process_urls(update, context, urls, action, query, download_id):
 
         if action == "telegram":
             if archive_size > TELEGRAM_MAX_UPLOAD:
-                await update_progress("📦 Splitting archive...")
+                await update_progress(f"📦 Splitting archive ({_format_size(archive_size)})...")
                 volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),
                     password,
-                    settings.max_telegram_size_mb - 1
+                    settings.max_telegram_size_mb - 1,
+                    update_progress
                 )
                 total = len(volumes)
+                await update_progress(f"📤 Uploading {total} parts...")
                 for i, vol in enumerate(volumes, 1):
                     if is_cancelled(download_id):
                         await query.edit_message_text("🛑 Cancelled.")
@@ -443,8 +446,9 @@ async def _process_urls(update, context, urls, action, query, download_id):
                         )
                     if i < total:
                         await asyncio.sleep(1)
+                    await update_progress(f"📤 Uploaded {i}/{total} parts")
                 await query.edit_message_text(
-                    f"✅ Sent in {total} parts\n📏 {format_file_size(archive_size)}" +
+                    f"✅ Sent in {total} parts\n📏 {_format_size(archive_size)}" +
                     ("\n🔒 Protected" if password else "")
                 )
             else:
@@ -460,7 +464,7 @@ async def _process_urls(update, context, urls, action, query, download_id):
                         caption=caption
                     )
                 await query.edit_message_text(
-                    "✅ Sent\n📏 " + format_file_size(archive_size) +
+                    "✅ Sent\n📏 " + _format_size(archive_size) +
                     ("\n🔒 Protected" if password else "")
                 )
 
@@ -471,7 +475,7 @@ async def _process_urls(update, context, urls, action, query, download_id):
             message = (
                 f"✅ **Hosted!**\n\n"
                 f"📁 `{names}`\n"
-                f"📏 `{format_file_size(archive_size)}`\n\n"
+                f"📏 `{_format_size(archive_size)}`\n\n"
                 f"📎 `{link}`\n"
                 f"🔗 [Open Link]({link})"
             )
@@ -494,7 +498,6 @@ async def _process_urls(update, context, urls, action, query, download_id):
     finally:
         active_downloads.pop(download_id, None)
         shutil.rmtree(temp_dir, ignore_errors=True)
-
 
 async def _download_telegram_file(file, dest_path: str) -> bool:
     """Download file from Telegram with fallback."""
