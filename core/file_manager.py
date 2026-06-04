@@ -45,11 +45,12 @@ class FileManager:
         shutil.move(source_path, dest_path)
         return dest_path
     
-    def add_file_record(self, filename: str, file_size: int):
+    def add_file_record(self, filename: str, file_size: int, original_name: str = ""):
         """Add file metadata record."""
         metadata = self.load_metadata()
         metadata.append({
             "filename": filename,
+            "original_name": original_name or filename,
             "created_at": time.time(),
             "file_size": file_size
         })
@@ -63,12 +64,24 @@ class FileManager:
         return None
     
     def delete_file(self, filename: str) -> bool:
-        """Delete a hosted file."""
+        """Delete a hosted file by filename."""
         file_path = os.path.join(HOSTED_FILES_DIR, filename)
         if os.path.exists(file_path):
-            os.remove(file_path)
-            return True
+            try:
+                os.remove(file_path)
+                return True
+            except OSError:
+                return False
         return False
+    
+    def get_recent_files(self, limit: int = 20) -> List[Dict]:
+        """Get recent files sorted by creation time."""
+        metadata = self.load_metadata()
+        return sorted(
+            metadata,
+            key=lambda x: x.get("created_at", 0),
+            reverse=True
+        )[:limit]
     
     async def cleanup_expired(self, store_time_hours: int):
         """Delete expired files."""
