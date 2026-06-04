@@ -87,7 +87,6 @@ class Aria2Downloader:
                 )
                 
                 if is_single:
-                    # Single file: parse progress
                     last_percent = 0
                     while True:
                         line = await process.stdout.readline()
@@ -106,37 +105,32 @@ class Aria2Downloader:
                                         last_percent = percent
                                         size_match = re.search(r'(\d+\w+)/(\d+\w+)', line_text)
                                         if size_match:
-                                            downloaded = size_match.group(1)
-                                            total = size_match.group(2)
                                             await progress_callback(
                                                 f"📥 Downloading... {percent}%\n"
-                                                f"📏 {downloaded} / {total}"
+                                                f"📏 {size_match.group(1)} / {size_match.group(2)}"
                                             )
                                         else:
                                             await progress_callback(f"📥 Downloading... {percent}%")
                             except Exception:
                                 pass
-                else:
-                    # Multiple files: just wait, don't parse output
-                    await process.wait()
                 
-                # Wait for process to complete (for single files too)
-                if is_single:
-                    await process.wait()
+                # Wait for process to complete
+                await process.wait()
                 
-                # Check result and collect files
                 if process.returncode == 0:
                     if progress_callback and is_single:
                         await progress_callback("✅ Download complete")
                     
-                    # Find new files in dest_dir
+                    # Collect downloaded files (skip .aria2 temp files)
                     for file in os.listdir(dest_dir):
                         if file.endswith('.aria2'):
                             continue
                         file_path = os.path.join(dest_dir, file)
                         if os.path.isfile(file_path) and file_path not in downloaded_files:
                             downloaded_files.add(file_path)
+                            logger.info(f"Downloaded: {file}")
                 else:
+                    logger.error(f"aria2 failed with code {process.returncode}")
                     if progress_callback:
                         await progress_callback(f"❌ Failed {idx+1}/{total_urls}", force=True)
                     
@@ -145,6 +139,7 @@ class Aria2Downloader:
                 if progress_callback:
                     await progress_callback(f"❌ Error {idx+1}/{total_urls}", force=True)
         
+        logger.info(f"Total downloaded files: {len(downloaded_files)}")
         return list(downloaded_files)
 
 
@@ -206,6 +201,7 @@ class DirectDownloader:
                                     f.write(chunk)
                         
                         downloaded.append(filepath)
+                        logger.info(f"Downloaded: {fname}")
                         
                         if progress_callback and is_single:
                             file_size = os.path.getsize(filepath)
