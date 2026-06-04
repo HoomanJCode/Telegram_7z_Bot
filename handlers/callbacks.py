@@ -22,7 +22,6 @@ archiver = SevenZipArchiver()
 TELEGRAM_MAX_DOWNLOAD = 20 * 1024 * 1024
 TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024
 
-# Store active downloads for cancellation
 active_downloads = {}
 
 
@@ -52,7 +51,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # Handle cancel download
     if data.startswith("cancel_dl:"):
         download_id = data.split(":", 1)[1]
         if download_id in active_downloads:
@@ -112,9 +110,8 @@ async def _handle_menu_callback(update, context, query, data):
                 link = f"{settings.host_base_url}/files/{entry.get('filename')}"
                 keyboard.append([InlineKeyboardButton(f"📎 {fname[:30]}", url=link)])
 
-        # Add Clear Cache and Back buttons
         keyboard.append([
-            InlineKeyboardButton("🗑️ Clear All Files", callback_data="menu:clear_cache"),
+            InlineKeyboardButton("🗑️ Clear All", callback_data="menu:clear_cache"),
             InlineKeyboardButton("🔙 Back", callback_data="menu:main")
         ])
         await query.edit_message_text(
@@ -132,7 +129,7 @@ async def _handle_menu_callback(update, context, query, data):
         file_manager.save_metadata([])
         
         await query.edit_message_text(
-            f"🗑️ Cleared **{deleted}** file(s) from cache.",
+            f"🗑️ Cleared **{deleted}** file(s).",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Back", callback_data="menu:main")
@@ -143,8 +140,8 @@ async def _handle_menu_callback(update, context, query, data):
         metadata = file_manager.load_metadata()
         status = (
             f"📊 **Status**\n\n"
-            f"• Hosted files: `{len(metadata)}`\n"
-            f"• Storage time: `{format_time(settings.store_time_hours * 3600)}`\n"
+            f"• Files: `{len(metadata)}`\n"
+            f"• Storage: `{format_time(settings.store_time_hours * 3600)}`\n"
             f"• Hosting: `{'Active' if settings.is_host_enabled else 'Inactive'}`"
         )
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu:main")]]
@@ -162,10 +159,10 @@ async def _handle_menu_callback(update, context, query, data):
             "🤖 **Help**\n\n"
             "• Send links → Download & archive\n"
             "• Send files → Convert to 7z\n"
-            "• Send .txt files → Extract links\n"
-            "• /start → Main menu\n"
-            "• /recent → Recent files\n"
-            "• /setpassword → Set password"
+            "• Send .txt → Extract links\n"
+            "• /start → Menu\n"
+            "• /recent → Files\n"
+            "• /setpassword → Password"
         )
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu:main")]]
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -178,7 +175,7 @@ async def _handle_menu_callback(update, context, query, data):
             [InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")]
         ]
         await query.edit_message_text(
-            "🤖 **Main Menu**\n\nSend me links or files to get started!",
+            "🤖 **Main Menu**\n\nSend links or files!",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -271,8 +268,7 @@ async def _process_file(update, context, file_info, action, query, download_id):
             await query.edit_message_text("🛑 Cancelled.")
             return
 
-        file_size = os.path.getsize(dl_path)
-        await update_progress(f"📦 Compressing ({_format_size(file_size)})...")
+        # Archiver sends its own initial message
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await archiver.create_archive([dl_path], archive_path, password, update_progress)
@@ -284,7 +280,7 @@ async def _process_file(update, context, file_info, action, query, download_id):
 
         if action == "telegram":
             if archive_size > TELEGRAM_MAX_UPLOAD:
-                await update_progress(f"📦 Splitting ({_format_size(archive_size)})...")
+                # Archiver sends its own initial message
                 volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),
@@ -409,7 +405,7 @@ async def _process_urls(update, context, urls, action, query, download_id):
         if len(files) > 3:
             names += f" +{len(files) - 3} more"
 
-        # Create archive with progress
+        # Archiver sends its own initial message
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await archiver.create_archive(files, archive_path, password, update_progress)
@@ -421,6 +417,7 @@ async def _process_urls(update, context, urls, action, query, download_id):
 
         if action == "telegram":
             if archive_size > TELEGRAM_MAX_UPLOAD:
+                # Archiver sends its own initial message
                 volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),

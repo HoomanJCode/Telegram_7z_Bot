@@ -41,9 +41,10 @@ class SevenZipArchiver:
         cmd.extend(files)
         
         total_files = len(files)
+        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
         
+        # Send initial progress message
         if progress_callback:
-            total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
             await progress_callback(f"📦 Compressing {total_files} file(s) ({_format_size(total_size)})...")
         
         process = await asyncio.create_subprocess_exec(
@@ -62,7 +63,6 @@ class SevenZipArchiver:
             line_text = line.decode().strip()
             
             if progress_callback and line_text:
-                # 7z progress format: " 45% 12 - filename.zip"
                 percent_match = re.search(r'^\s*(\d+)%', line_text)
                 if percent_match:
                     percent = int(percent_match.group(1))
@@ -98,9 +98,10 @@ class SevenZipArchiver:
         cmd.extend(files)
         
         total_files = len(files)
+        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
         
+        # Send initial progress message
         if progress_callback:
-            total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
             await progress_callback(f"📦 Splitting {total_files} file(s) ({_format_size(total_size)})...")
         
         process = await asyncio.create_subprocess_exec(
