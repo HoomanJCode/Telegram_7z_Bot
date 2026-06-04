@@ -11,16 +11,15 @@ logger = setup_logger(__name__)
 
 
 class ProgressTracker:
-    """Track download progress and report changes."""
+    """Track download progress for single files."""
     
-    def __init__(self, total_size: int = 0, callback: Optional[Callable] = None, show_detail: bool = True):
+    def __init__(self, total_size: int = 0, callback: Optional[Callable] = None):
         self.total_size = total_size
         self.downloaded = 0
         self.last_percent = -1
         self.last_time = 0
         self.start_time = time.time()
         self.callback = callback
-        self.show_detail = show_detail  # Show detailed progress for single files
     
     def update(self, chunk_size: int):
         """Update progress and call callback if significant change."""
@@ -37,15 +36,10 @@ class ProgressTracker:
             self.last_time = now
             
             if self.callback:
-                if self.show_detail:
-                    # Single file: show detailed progress
-                    status = (
-                        f"📥 Downloading... {percent}%\n"
-                        f"📏 {format_file_size(self.downloaded)} / {format_file_size(self.total_size)}"
-                    )
-                else:
-                    # Multiple files: just show percentage
-                    status = f"📥 Downloading... {percent}%"
+                status = (
+                    f"📥 Downloading... {percent}%\n"
+                    f"📏 {format_file_size(self.downloaded)} / {format_file_size(self.total_size)}"
+                )
                 asyncio.create_task(self.callback(status))
 
 
@@ -69,7 +63,8 @@ class Aria2Downloader:
                     if is_single:
                         await progress_callback("📥 Starting download...")
                     else:
-                        await progress_callback(f"📥 Downloading {idx+1}/{total_urls}...")
+                        # Simple count for multiple files - force update
+                        await progress_callback(f"📥 Downloading {idx+1}/{total_urls}", force=True)
                 
                 cmd = [
                     "aria2c",
@@ -92,25 +87,24 @@ class Aria2Downloader:
                     stderr=asyncio.subprocess.STDOUT
                 )
                 
-                last_percent = 0
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    
-                    line_text = line.decode().strip()
-                    
-                    if progress_callback and '(' in line_text and '%)' in line_text:
-                        try:
-                            percent_match = re.search(r'\((\d+)%\)', line_text)
-                            if percent_match:
-                                percent = int(percent_match.group(1))
-                                
-                                if percent >= last_percent + 5:
-                                    last_percent = percent
+                # Only parse progress for single files
+                if is_single:
+                    last_percent = 0
+                    while True:
+                        line = await process.stdout.readline()
+                        if not line:
+                            break
+                        
+                        line_text = line.decode().strip()
+                        
+                        if progress_callback and '(' in line_text and '%)' in line_text:
+                            try:
+                                percent_match = re.search(r'\((\d+)%\)', line_text)
+                                if percent_match:
+                                    percent = int(percent_match.group(1))
                                     
-                                    if is_single:
-                                        # Single file: show size progress
+                                    if percent >= last_percent + 5:
+                                        last_percent = percent
                                         size_match = re.search(r'(\d+\w+)/(\d+\w+)', line_text)
                                         if size_match:
                                             downloaded = size_match.group(1)
@@ -121,22 +115,22 @@ class Aria2Downloader:
                                             )
                                         else:
                                             await progress_callback(f"📥 Downloading... {percent}%")
-                                    else:
-                                        # Multiple files: show file count
-                                        await progress_callback(
-                                            f"📥 {idx+1}/{total_urls} - {percent}%"
-                                        )
-                        except Exception:
-                            pass
+                            except Exception:
+                                pass
+                else:
+                    # For multiple files, just wait silently
+                    await process.wait()
+                    # Skip reading output for multiple files
+                    if process.returncode != 0:
+                        if progress_callback:
+                            await progress_callback(f"❌ Failed {idx+1}/{total_urls}", force=True)
+                    continue
                 
                 await process.wait()
                 
                 if process.returncode == 0:
-                    if progress_callback:
-                        if is_single:
-                            await progress_callback("✅ Download complete")
-                        else:
-                            await progress_callback(f"✅ Completed {idx+1}/{total_urls}")
+                    if progress_callback and is_single:
+                        await progress_callback("✅ Download complete")
                     
                     for file in os.listdir(dest_dir):
                         if file.endswith('.aria2'):
@@ -146,12 +140,12 @@ class Aria2Downloader:
                             downloaded_files.add(file_path)
                 else:
                     if progress_callback:
-                        await progress_callback(f"❌ Failed {idx+1}/{total_urls}")
+                        await progress_callback(f"❌ Failed {idx+1}/{total_urls}", force=True)
                     
             except Exception as e:
                 logger.error(f"Download error: {e}")
                 if progress_callback:
-                    await progress_callback(f"❌ Error {idx+1}/{total_urls}")
+                    await progress_callback(f"❌ Error {idx+1}/{total_urls}", force=True)
         
         return list(downloaded_files)
 
@@ -165,7 +159,7 @@ class DirectDownloader:
         dest_dir: str,
         progress_callback: Optional[Callable] = None
     ) -> List[str]:
-        """Download files using direct HTTP requests with progress."""
+        """Download files using direct HTTP requests."""
         downloaded: List[str] = []
         timeout = aiohttp.ClientTimeout(total=600)
         total_urls = len(urls)
@@ -178,7 +172,8 @@ class DirectDownloader:
                         if is_single:
                             await progress_callback("📥 Starting download...")
                         else:
-                            await progress_callback(f"📥 Downloading {idx+1}/{total_urls}...")
+                            # Simple count for multiple files - force update
+                            await progress_callback(f"📥 Downloading {idx+1}/{total_urls}", force=True)
                     
                     headers = {"User-Agent": "Mozilla/5.0"}
                     async with session.get(url, headers=headers) as resp:
@@ -202,27 +197,29 @@ class DirectDownloader:
                         filepath = os.path.join(dest_dir, fname)
                         
                         total_size = int(resp.headers.get('Content-Length', 0))
-                        # Show detail only for single files
-                        tracker = ProgressTracker(total_size, callback=progress_callback, show_detail=is_single)
                         
                         with open(filepath, "wb") as f:
-                            async for chunk in resp.content.iter_chunked(8192):
-                                f.write(chunk)
-                                tracker.update(len(chunk))
+                            if is_single and total_size > 0:
+                                # Single file: show progress
+                                tracker = ProgressTracker(total_size, callback=progress_callback)
+                                async for chunk in resp.content.iter_chunked(8192):
+                                    f.write(chunk)
+                                    tracker.update(len(chunk))
+                            else:
+                                # Multiple files: just download silently
+                                async for chunk in resp.content.iter_chunked(8192):
+                                    f.write(chunk)
                         
                         downloaded.append(filepath)
                         
-                        if progress_callback:
-                            if is_single:
-                                file_size = os.path.getsize(filepath)
-                                await progress_callback(f"✅ Download complete\n📏 {format_file_size(file_size)}")
-                            else:
-                                await progress_callback(f"✅ Completed {idx+1}/{total_urls}")
+                        if progress_callback and is_single:
+                            file_size = os.path.getsize(filepath)
+                            await progress_callback(f"✅ Download complete\n📏 {format_file_size(file_size)}")
                         
                 except Exception as e:
                     logger.error(f"Download failed: {e}")
                     if progress_callback:
-                        await progress_callback(f"❌ Failed {idx+1}/{total_urls}")
+                        await progress_callback(f"❌ Failed {idx+1}/{total_urls}", force=True)
         
         return downloaded
 
