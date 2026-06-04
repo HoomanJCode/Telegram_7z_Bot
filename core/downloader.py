@@ -40,7 +40,8 @@ class ProgressTracker:
                     f"📥 Downloading... {percent}%\n"
                     f"📏 {format_file_size(self.downloaded)} / {format_file_size(self.total_size)}"
                 )
-                asyncio.create_task(self.callback(status))
+                # Don't use asyncio.create_task - call directly
+                self.callback(status)
 
 
 class Aria2Downloader:
@@ -63,7 +64,6 @@ class Aria2Downloader:
                     if is_single:
                         await progress_callback("📥 Starting download...")
                     else:
-                        # Simple count for multiple files - force update
                         await progress_callback(f"📥 Downloading {idx+1}/{total_urls}", force=True)
                 
                 cmd = [
@@ -87,7 +87,6 @@ class Aria2Downloader:
                     stderr=asyncio.subprocess.STDOUT
                 )
                 
-                # Only parse progress for single files
                 if is_single:
                     last_percent = 0
                     while True:
@@ -118,12 +117,8 @@ class Aria2Downloader:
                             except Exception:
                                 pass
                 else:
-                    # For multiple files, just wait silently
+                    # For multiple files, just wait - no progress parsing
                     await process.wait()
-                    # Skip reading output for multiple files
-                    if process.returncode != 0:
-                        if progress_callback:
-                            await progress_callback(f"❌ Failed {idx+1}/{total_urls}", force=True)
                     continue
                 
                 await process.wait()
@@ -151,7 +146,7 @@ class Aria2Downloader:
 
 
 class DirectDownloader:
-    """Download files using aiohttp directly with progress tracking."""
+    """Download files using aiohttp directly."""
     
     @staticmethod
     async def download(
@@ -172,7 +167,6 @@ class DirectDownloader:
                         if is_single:
                             await progress_callback("📥 Starting download...")
                         else:
-                            # Simple count for multiple files - force update
                             await progress_callback(f"📥 Downloading {idx+1}/{total_urls}", force=True)
                     
                     headers = {"User-Agent": "Mozilla/5.0"}
@@ -200,13 +194,11 @@ class DirectDownloader:
                         
                         with open(filepath, "wb") as f:
                             if is_single and total_size > 0:
-                                # Single file: show progress
                                 tracker = ProgressTracker(total_size, callback=progress_callback)
                                 async for chunk in resp.content.iter_chunked(8192):
                                     f.write(chunk)
                                     tracker.update(len(chunk))
                             else:
-                                # Multiple files: just download silently
                                 async for chunk in resp.content.iter_chunked(8192):
                                     f.write(chunk)
                         
