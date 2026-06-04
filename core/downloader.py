@@ -53,6 +53,8 @@ class ProgressTracker:
 class Aria2Downloader:
     """Download files using aria2c."""
     
+    # In Aria2Downloader.download(), change to single reader:
+
     @staticmethod
     async def download(
         urls: List[str],
@@ -85,36 +87,26 @@ class Aria2Downloader:
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stderr=asyncio.subprocess.STDOUT  # Merge to single stream
                 )
                 
-                # Monitor progress from stderr
-                async def monitor_progress():
-                    while True:
-                        line = await process.stderr.readline()
-                        if not line:
-                            break
-                        line_text = line.decode().strip()
-                        # Parse aria2 progress (format: [DL:1.2MiB][#1 2%])
-                        if progress_callback and ('%' in line_text or 'MiB' in line_text):
-                            # Clean up aria2 output for user display
-                            clean_line = line_text.replace('[', '').replace(']', ' ')
-                            await progress_callback(f"📥 {clean_line[:80]}")
+                # Single reader
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    
+                    line_text = line.decode().strip()
+                    if progress_callback and ('%' in line_text or 'MiB' in line_text):
+                        clean_line = line_text.replace('[', '').replace(']', ' ')[:80]
+                        await progress_callback(f"📥 {clean_line}")
                 
-                monitor_task = asyncio.create_task(monitor_progress())
                 await process.wait()
-                monitor_task.cancel()
-                
-                try:
-                    await monitor_task
-                except asyncio.CancelledError:
-                    pass
                 
                 if process.returncode == 0:
                     if progress_callback:
                         await progress_callback(f"✅ Downloaded {idx+1}/{len(urls)}")
                     
-                    # Find downloaded files (exclude .aria2 control files)
                     for file in os.listdir(dest_dir):
                         if file.endswith('.aria2'):
                             continue

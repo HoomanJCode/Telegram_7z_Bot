@@ -32,50 +32,47 @@ class SevenZipArchiver:
         progress_callback: Optional[Callable] = None
     ) -> str:
         """Create a single 7z archive with progress."""
-        cmd = ["7z", "a", "-t7z", "-mx=1", output_path]
+        cmd = ["7z", "a", "-t7z", "-mx=1", "-bsp1", output_path]
         
         if password:
             cmd.extend([f"-p{password}", "-mhe=on"])
         
         cmd.extend(files)
         
-        # Calculate total input size for progress
-        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
-        
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.STDOUT  # Merge stderr to stdout
         )
         
-        # Monitor progress from stdout
-        async def monitor_progress():
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
-                line_text = line.decode().strip()
-                
-                if progress_callback and line_text:
-                    # Parse 7z progress (shows percentage)
-                    if '%' in line_text:
-                        # Clean up 7z output
-                        clean_msg = line_text.strip()
-                        if clean_msg and not clean_msg.startswith('7z'):
-                            await progress_callback(f"📦 Compressing: {clean_msg[:80]}")
+        # Read output line by line - single reader
+        last_progress = 0
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            
+            line_text = line.decode().strip()
+            
+            if progress_callback and line_text:
+                # Parse 7z progress (look for percentage)
+                if '%' in line_text:
+                    try:
+                        # Extract percentage
+                        percent_str = line_text.split('%')[0].strip()
+                        percent = int(percent_str) if percent_str.isdigit() else 0
+                        
+                        # Only update on significant changes
+                        if percent >= last_progress + 5:
+                            last_progress = percent
+                            await progress_callback(f"📦 Compressing: {percent}%")
+                    except ValueError:
+                        pass
         
-        monitor_task = asyncio.create_task(monitor_progress())
-        stdout, stderr = await process.communicate()
-        monitor_task.cancel()
-        
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
+        await process.wait()
         
         if process.returncode != 0:
-            error_msg = stderr.decode().strip() if stderr else "Unknown error"
-            raise RuntimeError(f"7z failed: {error_msg[:200]}")
+            raise RuntimeError("7z compression failed")
         
         if progress_callback:
             output_size = os.path.getsize(output_path)
@@ -92,48 +89,43 @@ class SevenZipArchiver:
         progress_callback: Optional[Callable] = None
     ) -> List[Path]:
         """Create a split 7z archive with progress."""
-        cmd = ["7z", "a", "-t7z", "-mx=0", f"-v{max_volume_mb}m"]
+        cmd = ["7z", "a", "-t7z", "-mx=0", f"-v{max_volume_mb}m", "-bsp1", output_base]
         
         if password:
             cmd.extend([f"-p{password}", "-mhe=on"])
         
-        cmd.append(output_base)
         cmd.extend(files)
-        
-        # Calculate total input size
-        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
         
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.STDOUT  # Merge to single stream
         )
         
-        # Monitor progress
-        async def monitor_progress():
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
-                line_text = line.decode().strip()
-                
-                if progress_callback and line_text and '%' in line_text:
-                    clean_msg = line_text.strip()
-                    if clean_msg and not clean_msg.startswith('7z'):
-                        await progress_callback(f"📦 Splitting: {clean_msg[:80]}")
+        # Single reader - no race condition
+        last_progress = 0
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            
+            line_text = line.decode().strip()
+            
+            if progress_callback and line_text and '%' in line_text:
+                try:
+                    percent_str = line_text.split('%')[0].strip()
+                    percent = int(percent_str) if percent_str.isdigit() else 0
+                    
+                    if percent >= last_progress + 5:
+                        last_progress = percent
+                        await progress_callback(f"📦 Splitting: {percent}%")
+                except ValueError:
+                    pass
         
-        monitor_task = asyncio.create_task(monitor_progress())
-        stdout, stderr = await process.communicate()
-        monitor_task.cancel()
-        
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
+        await process.wait()
         
         if process.returncode != 0:
-            error_msg = stderr.decode().strip() if stderr else "Unknown error"
-            raise RuntimeError(f"7z split failed: {error_msg[:200]}")
+            raise RuntimeError("7z split failed")
         
         # Find all volumes
         output_dir = os.path.dirname(output_base)
