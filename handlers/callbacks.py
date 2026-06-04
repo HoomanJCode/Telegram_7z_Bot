@@ -26,7 +26,6 @@ active_downloads = {}
 
 
 def _format_size(size_bytes: int) -> str:
-    """Format file size for display."""
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size_bytes < 1024:
             return f"{size_bytes:.1f} {unit}"
@@ -35,18 +34,15 @@ def _format_size(size_bytes: int) -> str:
 
 
 def get_settings(context: ContextTypes.DEFAULT_TYPE):
-    """Get settings from bot_data."""
     return context.application.bot_data.get("settings") or context.application.bot_data.get("config")
 
 
 def is_cancelled(download_id: str) -> bool:
-    """Check if download is cancelled."""
     return not active_downloads.get(download_id, True)
 
 
 @restricted
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all callback queries."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -81,7 +77,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _handle_menu_callback(update, context, query, data):
-    """Handle main menu callbacks."""
     _, action = data.split(":", 1)
     settings = get_settings(context)
 
@@ -150,20 +145,12 @@ async def _handle_menu_callback(update, context, query, data):
     elif action == "password":
         user_id = str(update.effective_user.id)
         passwords = context.application.bot_data["passwords"]
-        text = "✅ Password is set." if user_id in passwords else "❌ No password set.\nUse /setpassword to set one."
+        text = "✅ Password is set." if user_id in passwords else "❌ No password set."
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu:main")]]
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "help":
-        text = (
-            "🤖 **Help**\n\n"
-            "• Send links → Download & archive\n"
-            "• Send files → Convert to 7z\n"
-            "• Send .txt → Extract links\n"
-            "• /start → Menu\n"
-            "• /recent → Files\n"
-            "• /setpassword → Password"
-        )
+        text = "🤖 **Help**\n\n• Send links → Download\n• Send files → Convert\n• /start → Menu"
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu:main")]]
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -182,9 +169,7 @@ async def _handle_menu_callback(update, context, query, data):
 
 
 async def _handle_file_callback(update, context, query, data):
-    """Handle file action callbacks."""
     _, action = data.split(":", 1)
-
     if action == "cancel":
         context.user_data.pop("pending_file", None)
         await query.edit_message_text("❌ Cancelled.")
@@ -208,7 +193,6 @@ async def _handle_file_callback(update, context, query, data):
 
 
 async def _handle_url_callback(update, context, query, data):
-    """Handle URL action callbacks."""
     parts = data.split(":", 1)
     if len(parts) != 2:
         return
@@ -232,23 +216,16 @@ async def _handle_url_callback(update, context, query, data):
 
 
 async def _process_file(update, context, file_info, action, query, download_id):
-    """Process uploaded file."""
     settings = get_settings(context)
     passwords = context.application.bot_data["passwords"]
     password = passwords.get(str(update.effective_user.id), "")
     temp_dir = tempfile.mkdtemp(prefix="fb_")
     last_update = 0
 
-    async def update_progress(message: str):
+    async def update_progress(message: str, force: bool = False):
         nonlocal last_update
         now = time.time()
-        # Always allow phase changes (Compressing, Splitting, Uploading)
-        # Only rate-limit percentage updates within same phase
-        is_phase_change = any(phrase in message for phrase in [
-            "Compressing", "Compressed", "Splitting", "Split into", "Uploading", "Uploaded", "Downloading"
-        ])
-        
-        if is_phase_change or now - last_update >= 2:
+        if force or now - last_update >= 2:
             last_update = now
             try:
                 await query.edit_message_text(
@@ -265,7 +242,7 @@ async def _process_file(update, context, file_info, action, query, download_id):
             await query.edit_message_text("🛑 Cancelled.")
             return
 
-        await update_progress("📥 Downloading file...")
+        await update_progress("📥 Downloading file...", force=True)
         file = await context.bot.get_file(file_info["file_id"])
         dl_path = os.path.join(temp_dir, file_info.get("file_name", "file"))
         await _download_telegram_file(file, dl_path)
@@ -309,13 +286,13 @@ async def _process_file(update, context, file_info, action, query, download_id):
                         )
                     if i < total:
                         await asyncio.sleep(1)
-                    await update_progress(f"📤 Uploaded {i}/{total} parts")
+                    await update_progress(f"📤 Uploaded {i}/{total} parts", force=True)
                 await query.edit_message_text(
                     f"✅ Sent in {total} parts\n📏 {_format_size(archive_size)}" +
                     ("\n🔒 Protected" if password else "")
                 )
             else:
-                await update_progress("📤 Uploading...")
+                await update_progress("📤 Uploading...", force=True)
                 caption = f"📦 {file_info.get('file_name', 'File')}"
                 if password:
                     caption += "\n🔒 Protected"
@@ -364,23 +341,16 @@ async def _process_file(update, context, file_info, action, query, download_id):
 
 
 async def _process_urls(update, context, urls, action, query, download_id):
-    """Process URLs with progress updates."""
     settings = get_settings(context)
     passwords = context.application.bot_data["passwords"]
     password = passwords.get(str(update.effective_user.id), "")
     temp_dir = tempfile.mkdtemp(prefix="fb_")
     last_update = 0
 
-    async def update_progress(message: str):
+    async def update_progress(message: str, force: bool = False):
         nonlocal last_update
         now = time.time()
-        # Always allow phase changes (Downloading, Compressing, Splitting, Uploading)
-        # Only rate-limit percentage updates within same phase
-        is_phase_change = any(phrase in message for phrase in [
-            "Compressing", "Compressed", "Splitting", "Split into", "Uploading", "Uploaded", "Downloading"
-        ])
-        
-        if is_phase_change or now - last_update >= 2:
+        if force or now - last_update >= 2:
             last_update = now
             try:
                 await query.edit_message_text(
@@ -397,7 +367,7 @@ async def _process_urls(update, context, urls, action, query, download_id):
             await query.edit_message_text("🛑 Cancelled.")
             return
 
-        await update_progress(f"📥 Downloading {len(urls)} file(s)...")
+        await update_progress(f"📥 Downloading {len(urls)} file(s)...", force=True)
 
         downloader = DownloadManager(settings.download_method)
         files = await downloader.download(urls, temp_dir, update_progress)
@@ -449,13 +419,13 @@ async def _process_urls(update, context, urls, action, query, download_id):
                         )
                     if i < total:
                         await asyncio.sleep(1)
-                    await update_progress(f"📤 Uploaded {i}/{total} parts")
+                    await update_progress(f"📤 Uploaded {i}/{total} parts", force=True)
                 await query.edit_message_text(
                     f"✅ Sent in {total} parts\n📏 {_format_size(archive_size)}" +
                     ("\n🔒 Protected" if password else "")
                 )
             else:
-                await update_progress("📤 Uploading...")
+                await update_progress("📤 Uploading...", force=True)
                 caption = f"📦 {names}"
                 if password:
                     caption += "\n🔒 Protected"
