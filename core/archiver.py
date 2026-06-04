@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from pathlib import Path
 from typing import List, Optional, Callable
 from utils.logger import setup_logger
@@ -39,14 +40,20 @@ class SevenZipArchiver:
         
         cmd.extend(files)
         
+        total_files = len(files)
+        
+        if progress_callback:
+            total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+            await progress_callback(f"📦 Compressing {total_files} file(s) ({_format_size(total_size)})...")
+        
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT  # Merge stderr to stdout
+            stderr=asyncio.subprocess.STDOUT
         )
         
-        # Read output line by line - single reader
-        last_progress = 0
+        # Parse 7z output for clean progress
+        last_percent = 0
         while True:
             line = await process.stdout.readline()
             if not line:
@@ -55,19 +62,13 @@ class SevenZipArchiver:
             line_text = line.decode().strip()
             
             if progress_callback and line_text:
-                # Parse 7z progress (look for percentage)
-                if '%' in line_text:
-                    try:
-                        # Extract percentage
-                        percent_str = line_text.split('%')[0].strip()
-                        percent = int(percent_str) if percent_str.isdigit() else 0
-                        
-                        # Only update on significant changes
-                        if percent >= last_progress + 5:
-                            last_progress = percent
-                            await progress_callback(f"📦 Compressing: {percent}%")
-                    except ValueError:
-                        pass
+                # 7z progress format: " 45% 12 - filename.zip"
+                percent_match = re.search(r'^\s*(\d+)%', line_text)
+                if percent_match:
+                    percent = int(percent_match.group(1))
+                    if percent >= last_percent + 5:
+                        last_percent = percent
+                        await progress_callback(f"📦 Compressing: {percent}%")
         
         await process.wait()
         
@@ -96,14 +97,20 @@ class SevenZipArchiver:
         
         cmd.extend(files)
         
+        total_files = len(files)
+        
+        if progress_callback:
+            total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+            await progress_callback(f"📦 Splitting {total_files} file(s) ({_format_size(total_size)})...")
+        
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT  # Merge to single stream
+            stderr=asyncio.subprocess.STDOUT
         )
         
-        # Single reader - no race condition
-        last_progress = 0
+        # Parse 7z output for clean progress
+        last_percent = 0
         while True:
             line = await process.stdout.readline()
             if not line:
@@ -111,16 +118,13 @@ class SevenZipArchiver:
             
             line_text = line.decode().strip()
             
-            if progress_callback and line_text and '%' in line_text:
-                try:
-                    percent_str = line_text.split('%')[0].strip()
-                    percent = int(percent_str) if percent_str.isdigit() else 0
-                    
-                    if percent >= last_progress + 5:
-                        last_progress = percent
+            if progress_callback and line_text:
+                percent_match = re.search(r'^\s*(\d+)%', line_text)
+                if percent_match:
+                    percent = int(percent_match.group(1))
+                    if percent >= last_percent + 5:
+                        last_percent = percent
                         await progress_callback(f"📦 Splitting: {percent}%")
-                except ValueError:
-                    pass
         
         await process.wait()
         
