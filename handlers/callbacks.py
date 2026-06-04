@@ -242,7 +242,13 @@ async def _process_file(update, context, file_info, action, query, download_id):
     async def update_progress(message: str):
         nonlocal last_update
         now = time.time()
-        if now - last_update >= 2:
+        # Always allow phase changes (Compressing, Splitting, Uploading)
+        # Only rate-limit percentage updates within same phase
+        is_phase_change = any(phrase in message for phrase in [
+            "Compressing", "Compressed", "Splitting", "Split into", "Uploading", "Uploaded", "Downloading"
+        ])
+        
+        if is_phase_change or now - last_update >= 2:
             last_update = now
             try:
                 await query.edit_message_text(
@@ -268,7 +274,6 @@ async def _process_file(update, context, file_info, action, query, download_id):
             await query.edit_message_text("🛑 Cancelled.")
             return
 
-        # Archiver sends its own initial message
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await archiver.create_archive([dl_path], archive_path, password, update_progress)
@@ -280,7 +285,6 @@ async def _process_file(update, context, file_info, action, query, download_id):
 
         if action == "telegram":
             if archive_size > TELEGRAM_MAX_UPLOAD:
-                # Archiver sends its own initial message
                 volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),
@@ -370,7 +374,13 @@ async def _process_urls(update, context, urls, action, query, download_id):
     async def update_progress(message: str):
         nonlocal last_update
         now = time.time()
-        if now - last_update >= 2:
+        # Always allow phase changes (Downloading, Compressing, Splitting, Uploading)
+        # Only rate-limit percentage updates within same phase
+        is_phase_change = any(phrase in message for phrase in [
+            "Compressing", "Compressed", "Splitting", "Split into", "Uploading", "Uploaded", "Downloading"
+        ])
+        
+        if is_phase_change or now - last_update >= 2:
             last_update = now
             try:
                 await query.edit_message_text(
@@ -400,12 +410,10 @@ async def _process_urls(update, context, urls, action, query, download_id):
             await query.edit_message_text("❌ No files downloaded.")
             return
 
-        total_size = sum(os.path.getsize(f) for f in files)
         names = ", ".join([os.path.basename(f) for f in files[:3]])
         if len(files) > 3:
             names += f" +{len(files) - 3} more"
 
-        # Archiver sends its own initial message
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await archiver.create_archive(files, archive_path, password, update_progress)
@@ -417,7 +425,6 @@ async def _process_urls(update, context, urls, action, query, download_id):
 
         if action == "telegram":
             if archive_size > TELEGRAM_MAX_UPLOAD:
-                # Archiver sends its own initial message
                 volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),
