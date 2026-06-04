@@ -22,6 +22,9 @@ archiver = SevenZipArchiver()
 TELEGRAM_MAX_DOWNLOAD = 20 * 1024 * 1024
 TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024
 
+# Store active downloads for cancellation
+active_downloads = {}
+
 
 def get_settings(context: ContextTypes.DEFAULT_TYPE):
     """Get settings from bot_data."""
@@ -34,6 +37,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    # Handle cancel download
+    if data.startswith("cancel_dl:"):
+        download_id = data.split(":", 1)[1]
+        if download_id in active_downloads:
+            active_downloads[download_id] = False
+            await query.edit_message_text("🛑 Download cancelled.")
+        else:
+            await query.edit_message_text("❌ No active download to cancel.")
+        return
 
     if data == "cancel":
         context.user_data.clear()
@@ -63,7 +76,12 @@ async def _handle_menu_callback(update, context, query, data):
     if action == "recent":
         metadata = file_manager.load_metadata()
         if not metadata:
-            await query.edit_message_text("📁 No hosted files found.")
+            await query.edit_message_text(
+                "📁 No hosted files found.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Back", callback_data="menu:main")
+                ]])
+            )
             return
 
         recent = sorted(metadata, key=lambda x: x.get("created_at", 0), reverse=True)[:10]
@@ -80,24 +98,63 @@ async def _handle_menu_callback(update, context, query, data):
                 link = f"{settings.host_base_url}/files/{entry.get('filename')}"
                 keyboard.append([InlineKeyboardButton(f"📎 {fname[:30]}", url=link)])
 
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu:main")])
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard[:11]))
+        # Add Clear Cache and Back buttons
+        keyboard.append([
+            InlineKeyboardButton("🗑️ Clear All Files", callback_data="menu:clear_cache"),
+            InlineKeyboardButton("🔙 Back", callback_data="menu:main")
+        ])
+        await query.edit_message_text(
+            message,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard[:11])
+        )
+
+    elif action == "clear_cache":
+        # Clear all hosted files
+        metadata = file_manager.load_metadata()
+        deleted = 0
+        for entry in metadata:
+            if file_manager.delete_file(entry.get("filename", "")):
+                deleted += 1
+        file_manager.save_metadata([])
+        
+        await query.edit_message_text(
+            f"🗑️ Cleared **{deleted}** file(s) from cache.",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Back", callback_data="menu:main")
+            ]])
+        )
 
     elif action == "status":
         metadata = file_manager.load_metadata()
-        status = f"📊 **Status**\n\n• Files: `{len(metadata)}`\n• Storage: `{format_time(settings.store_time_hours * 3600)}`"
+        status = (
+            f"📊 **Status**\n\n"
+            f"• Hosted files: `{len(metadata)}`\n"
+            f"• Storage time: `{format_time(settings.store_time_hours * 3600)}`\n"
+            f"• Download: `Enabled`\n"
+            f"• Hosting: `{'Active' if settings.is_host_enabled else 'Inactive'}`"
+        )
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu:main")]]
         await query.edit_message_text(status, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "password":
         user_id = str(update.effective_user.id)
         passwords = context.application.bot_data["passwords"]
-        text = f"✅ Password: `{mask_string(passwords[user_id])}`" if user_id in passwords else "❌ No password set."
+        text = f"✅ Password is set." if user_id in passwords else "❌ No password set.\nUse /setpassword to set one."
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu:main")]]
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "help":
-        text = "🤖 **Help**\n\n• Send links → 7z archive\n• Send files → Convert\n• /start for menu"
+        text = (
+            "🤖 **Help**\n\n"
+            "• Send links → Download & archive\n"
+            "• Send files → Convert to 7z\n"
+            "• Send .txt files → Extract links\n"
+            "• /start → Main menu\n"
+            "• /recent → Recent files\n"
+            "• /setpassword → Set password"
+        )
         keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu:main")]]
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -108,7 +165,11 @@ async def _handle_menu_callback(update, context, query, data):
             [InlineKeyboardButton("🔒 My Password", callback_data="menu:password")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")]
         ]
-        await query.edit_message_text("🤖 **Main Menu**", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "🤖 **Main Menu**\n\nSend me links or files to get started!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def _handle_file_callback(update, context, query, data):
@@ -125,8 +186,16 @@ async def _handle_file_callback(update, context, query, data):
         await query.edit_message_text("⏰ Session expired. Send file again.")
         return
 
-    await query.edit_message_text("⏳ Processing...")
-    asyncio.create_task(_process_file(update, context, file_info, action, query))
+    download_id = str(uuid4())[:8]
+    active_downloads[download_id] = True
+
+    await query.edit_message_text(
+        "⏳ Processing...",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🛑 Cancel", callback_data=f"cancel_dl:{download_id}")
+        ]])
+    )
+    asyncio.create_task(_process_file(update, context, file_info, action, query, download_id))
 
 
 async def _handle_url_callback(update, context, query, data):
@@ -141,11 +210,24 @@ async def _handle_url_callback(update, context, query, data):
         await query.edit_message_text("⏰ Session expired. Send links again.")
         return
 
-    await query.edit_message_text(f"⏳ Processing {len(urls)} link(s)...")
-    asyncio.create_task(_process_urls(update, context, urls, action, query))
+    download_id = str(uuid4())[:8]
+    active_downloads[download_id] = True
+
+    await query.edit_message_text(
+        f"⏳ Processing {len(urls)} link(s)...",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🛑 Cancel", callback_data=f"cancel_dl:{download_id}")
+        ]])
+    )
+    asyncio.create_task(_process_urls(update, context, urls, action, query, download_id))
 
 
-async def _process_file(update, context, file_info, action, query):
+def is_cancelled(download_id: str) -> bool:
+    """Check if download is cancelled."""
+    return not active_downloads.get(download_id, True)
+
+
+async def _process_file(update, context, file_info, action, query, download_id):
     """Process uploaded file."""
     settings = get_settings(context)
     passwords = context.application.bot_data["passwords"]
@@ -159,26 +241,43 @@ async def _process_file(update, context, file_info, action, query):
         if now - last_update >= 3:
             last_update = now
             try:
-                await query.edit_message_text(message)
+                await query.edit_message_text(
+                    message,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🛑 Cancel", callback_data=f"cancel_dl:{download_id}")
+                    ]])
+                )
             except Exception:
                 pass
 
     try:
-        await query.edit_message_text("📥 Downloading file...")
+        if is_cancelled(download_id):
+            await query.edit_message_text("🛑 Cancelled.")
+            return
+
+        await update_progress("📥 Downloading file...")
         file = await context.bot.get_file(file_info["file_id"])
         dl_path = os.path.join(temp_dir, file_info.get("file_name", "file"))
         await _download_telegram_file(file, dl_path)
 
+        if is_cancelled(download_id):
+            await query.edit_message_text("🛑 Cancelled.")
+            return
+
         file_size = os.path.getsize(dl_path)
-        await query.edit_message_text(f"📦 Creating archive ({format_file_size(file_size)})...")
+        await update_progress(f"📦 Creating archive ({format_file_size(file_size)})...")
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await archiver.create_archive([dl_path], archive_path, password)
         archive_size = os.path.getsize(archive_path)
 
+        if is_cancelled(download_id):
+            await query.edit_message_text("🛑 Cancelled.")
+            return
+
         if action == "telegram":
             if archive_size > TELEGRAM_MAX_UPLOAD:
-                await query.edit_message_text("📦 Splitting archive...")
+                await update_progress("📦 Splitting archive...")
                 volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),
@@ -187,6 +286,9 @@ async def _process_file(update, context, file_info, action, query):
                 )
                 total = len(volumes)
                 for i, vol in enumerate(volumes, 1):
+                    if is_cancelled(download_id):
+                        await query.edit_message_text("🛑 Cancelled.")
+                        return
                     caption = f"📦 {file_info.get('file_name', 'File')}\nPart {i}/{total}"
                     if password:
                         caption += "\n🔒 Protected"
@@ -204,6 +306,7 @@ async def _process_file(update, context, file_info, action, query):
                     ("\n🔒 Password protected" if password else "")
                 )
             else:
+                await update_progress("📤 Uploading...")
                 caption = f"📦 {file_info.get('file_name', 'File')}"
                 if password:
                     caption += "\n🔒 Protected"
@@ -234,8 +337,7 @@ async def _process_file(update, context, file_info, action, query):
                 message += "\n🔒 Password protected"
             message += f"\n⏰ {format_time(settings.store_time_hours * 3600)}"
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Open Link", url=link)],
-                [InlineKeyboardButton("📁 Recent Files", callback_data="menu:recent")]
+                [InlineKeyboardButton("🔗 Open Link", url=link)]
             ])
             await query.edit_message_text(
                 message,
@@ -248,10 +350,11 @@ async def _process_file(update, context, file_info, action, query):
         logger.error(f"File error: {e}", exc_info=True)
         await query.edit_message_text(f"❌ Error: {str(e)[:200]}")
     finally:
+        active_downloads.pop(download_id, None)
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-async def _process_urls(update, context, urls, action, query):
+async def _process_urls(update, context, urls, action, query, download_id):
     """Process URLs with progress updates."""
     settings = get_settings(context)
     passwords = context.application.bot_data["passwords"]
@@ -265,15 +368,35 @@ async def _process_urls(update, context, urls, action, query):
         if now - last_update >= 3:
             last_update = now
             try:
-                await query.edit_message_text(message)
+                await query.edit_message_text(
+                    message,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🛑 Cancel", callback_data=f"cancel_dl:{download_id}")
+                    ]])
+                )
             except Exception:
                 pass
 
     try:
-        await query.edit_message_text(f"📥 Downloading {len(urls)} file(s)...")
+        if is_cancelled(download_id):
+            await query.edit_message_text("🛑 Cancelled.")
+            return
+
+        await update_progress(f"📥 Downloading {len(urls)} file(s)...")
 
         downloader = DownloadManager(settings.download_method)
-        files = await downloader.download(urls, temp_dir, update_progress)
+
+        # Override progress callback to not show method name
+        async def simple_progress(msg: str):
+            # Remove any method-specific text
+            clean_msg = msg.replace("with aria2", "").replace("with direct", "").strip()
+            await update_progress(clean_msg)
+
+        files = await downloader.download(urls, temp_dir, simple_progress)
+
+        if is_cancelled(download_id):
+            await query.edit_message_text("🛑 Cancelled.")
+            return
 
         if not files:
             await query.edit_message_text("❌ No files downloaded.")
@@ -284,15 +407,19 @@ async def _process_urls(update, context, urls, action, query):
         if len(files) > 3:
             names += f" +{len(files) - 3} more"
 
-        await query.edit_message_text(f"📦 Creating archive ({format_file_size(total_size)})...")
+        await update_progress(f"📦 Creating archive ({format_file_size(total_size)})...")
         archive_name = f"{uuid4().hex}.7z"
         archive_path = os.path.join(temp_dir, archive_name)
         await archiver.create_archive(files, archive_path, password)
         archive_size = os.path.getsize(archive_path)
 
+        if is_cancelled(download_id):
+            await query.edit_message_text("🛑 Cancelled.")
+            return
+
         if action == "telegram":
             if archive_size > TELEGRAM_MAX_UPLOAD:
-                await query.edit_message_text("📦 Splitting archive...")
+                await update_progress("📦 Splitting archive...")
                 volumes = await archiver.create_split_archive(
                     [archive_path],
                     os.path.join(temp_dir, "part.7z"),
@@ -301,6 +428,9 @@ async def _process_urls(update, context, urls, action, query):
                 )
                 total = len(volumes)
                 for i, vol in enumerate(volumes, 1):
+                    if is_cancelled(download_id):
+                        await query.edit_message_text("🛑 Cancelled.")
+                        return
                     caption = f"📦 Archive Part {i}/{total}"
                     if password:
                         caption += "\n🔒 Protected"
@@ -318,6 +448,7 @@ async def _process_urls(update, context, urls, action, query):
                     ("\n🔒 Protected" if password else "")
                 )
             else:
+                await update_progress("📤 Uploading...")
                 caption = f"📦 {names}"
                 if password:
                     caption += "\n🔒 Protected"
@@ -348,8 +479,7 @@ async def _process_urls(update, context, urls, action, query):
                 message += "\n🔒 Protected"
             message += f"\n⏰ {format_time(settings.store_time_hours * 3600)}"
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Open Link", url=link)],
-                [InlineKeyboardButton("📁 Recent Files", callback_data="menu:recent")]
+                [InlineKeyboardButton("🔗 Open Link", url=link)]
             ])
             await query.edit_message_text(
                 message,
@@ -362,6 +492,7 @@ async def _process_urls(update, context, urls, action, query):
         logger.error(f"URL error: {e}", exc_info=True)
         await query.edit_message_text(f"❌ Error: {str(e)[:200]}")
     finally:
+        active_downloads.pop(download_id, None)
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 

@@ -9,6 +9,7 @@ from utils.helpers import sanitize_filename, format_file_size
 
 logger = setup_logger(__name__)
 
+
 class ProgressTracker:
     """Track download progress and report changes."""
     
@@ -48,18 +49,23 @@ class ProgressTracker:
                 )
                 asyncio.create_task(self.callback(status))
 
+
 class Aria2Downloader:
     """Download files using aria2c."""
     
     @staticmethod
-    async def download(urls: List[str], dest_dir: str, progress_callback: Optional[Callable] = None) -> List[str]:
-        """Download files using aria2c with progress."""
+    async def download(
+        urls: List[str],
+        dest_dir: str,
+        progress_callback: Optional[Callable] = None
+    ) -> List[str]:
+        """Download files using aria2c."""
         downloaded_files: Set[str] = set()
         
         for idx, url in enumerate(urls):
             try:
                 if progress_callback:
-                    await progress_callback(f"📥 Downloading {idx+1}/{len(urls)} with aria2...")
+                    await progress_callback(f"📥 Starting download {idx+1}/{len(urls)}...")
                 
                 cmd = [
                     "aria2c",
@@ -82,39 +88,60 @@ class Aria2Downloader:
                     stderr=asyncio.subprocess.PIPE
                 )
                 
-                # Read aria2 progress from stderr
-                async def read_progress():
+                # Monitor progress from stderr
+                async def monitor_progress():
                     while True:
                         line = await process.stderr.readline()
                         if not line:
                             break
-                        line = line.decode().strip()
-                        if '%' in line and progress_callback:
-                            # Parse aria2 progress line
-                            await progress_callback(f"📥 {line[:100]}")
+                        line_text = line.decode().strip()
+                        # Parse aria2 progress (format: [DL:1.2MiB][#1 2%])
+                        if progress_callback and ('%' in line_text or 'MiB' in line_text):
+                            # Clean up aria2 output for user display
+                            clean_line = line_text.replace('[', '').replace(']', ' ')
+                            await progress_callback(f"📥 {clean_line[:80]}")
                 
-                progress_task = asyncio.create_task(read_progress())
+                monitor_task = asyncio.create_task(monitor_progress())
                 await process.wait()
-                progress_task.cancel()
+                monitor_task.cancel()
+                
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
                 
                 if process.returncode == 0:
+                    if progress_callback:
+                        await progress_callback(f"✅ Downloaded {idx+1}/{len(urls)}")
+                    
+                    # Find downloaded files (exclude .aria2 control files)
                     for file in os.listdir(dest_dir):
                         if file.endswith('.aria2'):
                             continue
                         file_path = os.path.join(dest_dir, file)
-                        if os.path.isfile(file_path):
+                        if os.path.isfile(file_path) and file_path not in downloaded_files:
                             downloaded_files.add(file_path)
-                            
+                else:
+                    if progress_callback:
+                        await progress_callback(f"❌ Failed: {idx+1}/{len(urls)}")
+                        
             except Exception as e:
-                logger.error(f"aria2 download error: {e}")
+                logger.error(f"Download error: {e}")
+                if progress_callback:
+                    await progress_callback(f"❌ Error downloading {idx+1}/{len(urls)}")
         
         return list(downloaded_files)
+
 
 class DirectDownloader:
     """Download files using aiohttp directly with progress tracking."""
     
     @staticmethod
-    async def download(urls: List[str], dest_dir: str, progress_callback: Optional[Callable] = None) -> List[str]:
+    async def download(
+        urls: List[str],
+        dest_dir: str,
+        progress_callback: Optional[Callable] = None
+    ) -> List[str]:
         """Download files using direct HTTP requests with progress."""
         downloaded: List[str] = []
         timeout = aiohttp.ClientTimeout(total=600)
@@ -122,15 +149,21 @@ class DirectDownloader:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for idx, url in enumerate(urls):
                 try:
+                    if progress_callback:
+                        await progress_callback(f"📥 Starting download {idx+1}/{len(urls)}...")
+                    
                     headers = {"User-Agent": "Mozilla/5.0"}
                     async with session.get(url, headers=headers) as resp:
                         resp.raise_for_status()
                         
-                        # Get filename
+                        # Get filename from Content-Disposition or URL
                         cd = resp.headers.get("Content-Disposition")
                         fname = None
                         if cd and "filename=" in cd:
-                            fname_match = re.findall(r'filename[^;=\n]*=((["\']).*?\2|[^;\n]*)', cd)
+                            fname_match = re.findall(
+                                r'filename[^;=\n]*=((["\']).*?\2|[^;\n]*)',
+                                cd
+                            )
                             if fname_match:
                                 fname = fname_match[0][0].strip('"\'')
                         
@@ -142,11 +175,9 @@ class DirectDownloader:
                         filepath = os.path.join(dest_dir, fname)
                         
                         total_size = int(resp.headers.get('Content-Length', 0))
-                        tracker = ProgressTracker(
-                            total_size,
-                            callback=progress_callback
-                        )
+                        tracker = ProgressTracker(total_size, callback=progress_callback)
                         
+                        # Download with progress
                         with open(filepath, "wb") as f:
                             async for chunk in resp.content.iter_chunked(8192):
                                 f.write(chunk)
@@ -155,14 +186,19 @@ class DirectDownloader:
                         downloaded.append(filepath)
                         
                         if progress_callback:
-                            await progress_callback(f"✅ Downloaded: {fname}")
+                            file_size = os.path.getsize(filepath)
+                            await progress_callback(
+                                f"✅ Downloaded {idx+1}/{len(urls)}\n"
+                                f"📏 {format_file_size(file_size)}"
+                            )
                         
                 except Exception as e:
                     logger.error(f"Download failed: {e}")
                     if progress_callback:
-                        await progress_callback(f"❌ Failed: {url[:50]}...")
+                        await progress_callback(f"❌ Failed: {idx+1}/{len(urls)}")
         
         return downloaded
+
 
 class DownloadManager:
     """Unified download interface with progress support."""
@@ -171,9 +207,21 @@ class DownloadManager:
         self.method = method
         self.downloader = Aria2Downloader() if method == "aria2" else DirectDownloader()
     
-    async def download(self, urls: List[str], dest_dir: str, progress_callback: Optional[Callable] = None) -> List[str]:
+    async def download(
+        self,
+        urls: List[str],
+        dest_dir: str,
+        progress_callback: Optional[Callable] = None
+    ) -> List[str]:
         """Download files with progress reporting."""
-        return await self.downloader.download(urls, dest_dir, progress_callback)
+        # Wrap callback to filter out internal details
+        async def safe_callback(message: str):
+            if progress_callback:
+                # Remove any method-specific text
+                clean_message = message.replace("with aria2", "").replace("with direct", "").strip()
+                await progress_callback(clean_message)
+        
+        return await self.downloader.download(urls, dest_dir, safe_callback)
     
     @staticmethod
     def check_availability() -> bool:
