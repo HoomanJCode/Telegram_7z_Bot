@@ -20,7 +20,7 @@ A powerful, modular Telegram bot that downloads files from URLs, creates passwor
 - **⏰ Auto Cleanup**: Expired files automatically deleted
 - **👥 Access Control**: Optional whitelist to restrict bot usage
 - **📊 Status Monitoring**: Real-time bot statistics and file management
-- **🚀 CI/CD**: Automatic deployment via GitHub Actions
+- **🚀 CI/CD**: Tests, Docker images, releases, and auto-deployment via GitHub Actions
 
 ## ⚠️ Disclaimer
 
@@ -215,18 +215,66 @@ python3 bot.py
 # Links will be: http://YOUR_VPS_IP:8080/files/filename.7z
 ```
 
-### GitHub Actions Deployment
+### GitHub Actions Deployment (Docker)
 
-The project includes automatic deployment via GitHub Actions. Set these secrets in your repository:
+The project ships with three GitHub Actions workflows that test, build, and deploy the bot as a Docker container:
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| `ci.yml` | Push / PR to `master` | Installs dependencies and runs the test suite |
+| `release.yml` | Push tag `v*` (e.g. `v1.0.0`) | Runs tests → builds & pushes the Docker image to GHCR → creates a GitHub Release with changelog → deploys to the VPS |
+| `deploy-manual.yml` | Manual (`workflow_dispatch`) | Deploys any released image tag to the VPS without rebuilding |
+
+The bot image is published to **GitHub Container Registry (GHCR)** as `ghcr.io/<owner>/<repo>:<tag>` (plus `latest`) and deployed on the VPS with Docker Compose into `/opt/telegram-7z-bot` (container `telegram-7z-bot`). Persistent data (hosted files, passwords) lives in `./data`.
+
+#### Release flow
+
+```bash
+# Create and push a tag — tests, image build, release, and deploy run automatically
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The deploy step is skipped automatically when no VPS secrets are configured, so the workflows can be used for CI and image publishing alone.
+
+#### Required secrets
+
+Set these in **Settings → Secrets and variables → Actions**:
 
 | Secret | Description |
 |--------|-------------|
 | `VPS_HOST` | Your VPS IP or domain |
-| `VPS_USER` | SSH username |
-| `VPS_SSH_PRIVATE_KEY` | SSH private key |
+| `VPS_USER` | SSH username (defaults to `root`) |
+| `VPS_SSH_PRIVATE_KEY` | SSH private key for the VPS |
 | `BOT_TOKEN` | Telegram bot token |
 | `HOST_BASE_URL` | Your VPS URL for direct links |
-| `TELEGRAM_CHAT_ID` | Chat ID for notifications |
+| `API_BASE_URL` | Optional custom Telegram API URL |
+| `API_BASE_FILE_URL` | Optional custom file API URL |
+| `ARIA2_SECRET` | Optional aria2 RPC secret |
+| `WHITELIST` | Optional comma-separated allowed user IDs |
+| `ADMIN_IDS` | Optional comma-separated admin user IDs |
+
+#### Optional variables
+
+Tunables can also be set as Actions **variables** (otherwise they fall back to their defaults):
+
+| Variable | Default |
+|----------|---------|
+| `HOST_PORT` | `8080` |
+| `STORE_TIME_HOURS` | `48` |
+| `MAX_TELEGRAM_SIZE_MB` | `50` |
+| `DOWNLOAD_METHOD` | `aria2` |
+| `ARIA2_RPC_URL` | `http://localhost:6800/jsonrpc` |
+
+#### VPS requirements
+
+Only Docker is needed on the VPS — it is installed automatically on the first deploy:
+
+```bash
+# Verify the running container after a deploy
+docker ps --filter name=telegram-7z-bot
+docker logs -f telegram-7z-bot
+```
 
 ## 📱 Usage
 
@@ -300,9 +348,9 @@ All files will be downloaded and packed into a single 7z archive.
 ```
 Telegram_7z_Bot/
 ├── .github/workflows/     # CI/CD workflows
-│   ├── deploy.yml         # Auto-deployment
-│   ├── backup.yml         # Daily backups
-│   └── health-check.yml   # Health monitoring
+│   ├── ci.yml             # Tests on push/PR
+│   ├── release.yml        # Docker image, release & deploy on tags
+│   └── deploy-manual.yml  # Manual deploy from the Actions tab
 ├── bot.py                 # Main entry point
 ├── config/                # Configuration management
 │   ├── __init__.py
@@ -548,7 +596,7 @@ This project serves as an example of effective human-AI collaboration in softwar
 
 - [ ] Database storage for passwords
 - [ ] Web dashboard for file management
-- [ ] Docker support
+- [x] Docker support
 - [ ] Multiple language support
 - [ ] Progress tracking for downloads
 - [ ] File preview support
