@@ -1,0 +1,14 @@
+.git
+.github
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+venv
+.env
+.env.*
+data
+cache_db.json
+deploy.sh
+run.sh
+Makefile
