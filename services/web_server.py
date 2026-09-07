@@ -8,12 +8,16 @@ logger = setup_logger(__name__)
 class WebServer:
     """HTTP server for serving hosted files."""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8080, settings=None):
         self.host = host
         self.port = port
         self.file_manager = FileManager()
         self._runner = None
         self._site = None
+        # Cache lifetime for CDN-friendly responses; files are deleted from
+        # origin after store_time_hours, so caches must not outlive them.
+        store_hours = getattr(settings, "store_time_hours", 48) if settings else 48
+        self._cache_control = f"public, max-age={int(store_hours) * 3600}"
     
     async def handle_file_request(self, request: web.Request):
         """Serve hosted files."""
@@ -30,7 +34,7 @@ class WebServer:
                 raise web.HTTPNotFound()
             
             logger.info(f"Serving file: {filename}")
-            return web.FileResponse(file_path)
+            return web.FileResponse(file_path, headers={"Cache-Control": self._cache_control})
             
         except web.HTTPException:
             raise

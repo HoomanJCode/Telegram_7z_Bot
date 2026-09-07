@@ -177,7 +177,7 @@ class FileBot:
         
         # Start web server if configured
         if self.settings.is_host_enabled:
-            self.web_server = WebServer("0.0.0.0", self.settings.host_port)
+            self.web_server = WebServer("0.0.0.0", self.settings.host_port, self.settings)
             await self.web_server.start()
         
         # Start cleanup task
