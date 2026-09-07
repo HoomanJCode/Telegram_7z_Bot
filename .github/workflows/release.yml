@@ -173,6 +173,7 @@ jobs:
           API_BASE_URL: ${{ secrets.API_BASE_URL || '' }}
           API_BASE_FILE_URL: ${{ secrets.API_BASE_FILE_URL || '' }}
           HOST_BASE_URL: ${{ secrets.HOST_BASE_URL || '' }}
+          ORIGIN_DOMAIN: ${{ secrets.ORIGIN_DOMAIN || vars.ORIGIN_DOMAIN || '' }}
           HOST_PORT: ${{ secrets.HOST_PORT || vars.HOST_PORT || '8080' }}
           STORE_TIME_HOURS: ${{ secrets.STORE_TIME_HOURS || vars.STORE_TIME_HOURS || '48' }}
           MAX_TELEGRAM_SIZE_MB: ${{ secrets.MAX_TELEGRAM_SIZE_MB || vars.MAX_TELEGRAM_SIZE_MB || '50' }}
@@ -211,11 +212,44 @@ jobs:
           printf '    restart: unless-stopped\n' >> /tmp/docker-compose.yml
           printf '    env_file:\n' >> /tmp/docker-compose.yml
           printf '      - .env\n' >> /tmp/docker-compose.yml
-          printf '    ports:\n' >> /tmp/docker-compose.yml
-          printf '      - "8080:8080"\n' >> /tmp/docker-compose.yml
-          printf '    volumes:\n' >> /tmp/docker-compose.yml
-          printf '      - ./.env:/app/.env\n' >> /tmp/docker-compose.yml
-          printf '      - ./data:/app/data\n' >> /tmp/docker-compose.yml
+          if [ -n "$ORIGIN_DOMAIN" ]; then
+            # HTTPS origin via Caddy (ACME): bot stays inside the compose network
+            printf '    volumes:\n' >> /tmp/docker-compose.yml
+            printf '      - ./.env:/app/.env\n' >> /tmp/docker-compose.yml
+            printf '      - ./data:/app/data\n' >> /tmp/docker-compose.yml
+            printf '\n' >> /tmp/docker-compose.yml
+            printf '  caddy:\n' >> /tmp/docker-compose.yml
+            printf '    image: caddy:2-alpine\n' >> /tmp/docker-compose.yml
+            printf '    container_name: %s-caddy\n' "$CONTAINER" >> /tmp/docker-compose.yml
+            printf '    restart: unless-stopped\n' >> /tmp/docker-compose.yml
+            printf '    environment:\n' >> /tmp/docker-compose.yml
+            printf '      - ORIGIN_DOMAIN=%s\n' "$ORIGIN_DOMAIN" >> /tmp/docker-compose.yml
+            printf '      - HOST_PORT=%s\n' "$HOST_PORT" >> /tmp/docker-compose.yml
+            printf '    ports:\n' >> /tmp/docker-compose.yml
+            printf '      - "80:80"\n' >> /tmp/docker-compose.yml
+            printf '      - "443:443"\n' >> /tmp/docker-compose.yml
+            printf '    volumes:\n' >> /tmp/docker-compose.yml
+            printf '      - ./Caddyfile:/etc/caddy/Caddyfile:ro\n' >> /tmp/docker-compose.yml
+            printf '      - caddy_data:/data\n' >> /tmp/docker-compose.yml
+            printf '      - caddy_config:/config\n' >> /tmp/docker-compose.yml
+            printf '    depends_on:\n' >> /tmp/docker-compose.yml
+            printf '      - bot\n' >> /tmp/docker-compose.yml
+            printf '\nvolumes:\n' >> /tmp/docker-compose.yml
+            printf '  caddy_data:\n' >> /tmp/docker-compose.yml
+            printf '  caddy_config:\n' >> /tmp/docker-compose.yml
+
+            # Caddyfile: automatic ACME certificate for the origin domain.
+            # {$VAR} placeholders are resolved by Caddy at startup.
+            printf '{$ORIGIN_DOMAIN} {\n' > /tmp/Caddyfile
+            printf '    reverse_proxy bot:{$HOST_PORT}\n' >> /tmp/Caddyfile
+            printf '}\n' >> /tmp/Caddyfile
+          else
+            printf '    ports:\n' >> /tmp/docker-compose.yml
+            printf '      - "8080:8080"\n' >> /tmp/docker-compose.yml
+            printf '    volumes:\n' >> /tmp/docker-compose.yml
+            printf '      - ./.env:/app/.env\n' >> /tmp/docker-compose.yml
+            printf '      - ./data:/app/data\n' >> /tmp/docker-compose.yml
+          fi
 
           # Replace placeholder with actual image on VPS
           FULL_IMAGE="ghcr.io/${IMAGE_NAME}:${IMAGE_TAG}"
@@ -230,6 +264,9 @@ jobs:
           # Copy files to VPS
           scp -P 22 /tmp/.env ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/.env
           scp -P 22 /tmp/docker-compose.yml ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/docker-compose.yml
+          if [ -n "$ORIGIN_DOMAIN" ]; then
+            scp -P 22 /tmp/Caddyfile ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/Caddyfile
+          fi
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
 
           # Replace placeholder with actual image on VPS
