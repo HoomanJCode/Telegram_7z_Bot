@@ -178,10 +178,13 @@ async def set_host_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     settings = get_settings(context)
     url = args[0].rstrip("/")
-    settings.update_host_url(url)
+    detected_port = settings.update_host_url(url)
+    message = f"✅ Host URL updated to: `{url}`\n"
+    if detected_port is not None:
+        message += f"🌐 Port detected from URL: `{detected_port}`\n"
+    message += "Restart bot to apply changes."
     await update.message.reply_text(
-        f"✅ Host URL updated to: `{url}`\n"
-        "Restart bot to apply changes.",
+        message,
         parse_mode='Markdown'
     )
 

@@ -1,5 +1,6 @@
 import os
-from typing import List
+from typing import List, Optional
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -40,6 +41,10 @@ class Settings:
         # Host Configuration
         self.host_base_url = self._get_str("HOST_BASE_URL")
         self.host_port = self._get_int("HOST_PORT", 8080)
+        # Auto-detect the port when HOST_BASE_URL specifies one explicitly
+        detected_port = self._extract_port(self.host_base_url)
+        if detected_port is not None:
+            self.host_port = detected_port
         
         # File Storage
         self.store_time_hours = self._get_int("STORE_TIME_HOURS", 48)
@@ -71,9 +76,27 @@ class Settings:
     def is_host_enabled(self) -> bool:
         return bool(self.host_base_url)
     
-    def update_host_url(self, url: str):
+    @staticmethod
+    def _extract_port(url: str) -> Optional[int]:
+        """Return the explicit port in a URL, or None if absent/invalid."""
+        if not url:
+            return None
+        if "://" not in url:
+            url = f"http://{url}"
+        try:
+            return urlparse(url).port
+        except ValueError:
+            return None
+    
+    def update_host_url(self, url: str) -> Optional[int]:
         self._update_env_file("HOST_BASE_URL", url)
         self.host_base_url = url
+        # Keep the web server port in sync when the URL specifies one explicitly
+        detected_port = self._extract_port(url)
+        if detected_port is not None:
+            self.host_port = detected_port
+            self._update_env_file("HOST_PORT", str(detected_port))
+        return detected_port
     
     def update_store_time(self, hours: int):
         self._update_env_file("STORE_TIME_HOURS", str(hours))
