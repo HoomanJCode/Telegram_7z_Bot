@@ -76,6 +76,34 @@ nano .env     # Edit configuration
 make run      # Start bot
 ```
 
+### 🐳 Docker + Automatic HTTPS
+
+The fastest way to deploy with automatic HTTPS (Let's Encrypt) is via Docker Compose. You need a domain pointed at your server's public IP.
+
+```bash
+# 1. Clone repository
+git clone https://github.com/HoomanJCode/Telegram_7z_Bot.git
+cd Telegram_7z_Bot
+
+# 2. Create .env from template
+cp env.example .env
+nano .env  # Fill in BOT_TOKEN, ORIGIN_DOMAIN, and HOST_BASE_URL
+
+# 3. Start with HTTPS
+docker compose up -d
+```
+
+**Required `.env` values for HTTPS:**
+
+| Variable | Example | Purpose |
+|----------|---------|--------|
+| `ORIGIN_DOMAIN` | `files.yourdomain.com` | Domain for Caddy to issue an SSL cert |
+| `HOST_BASE_URL` | `https://files.yourdomain.com` | URL used in generated links |
+
+Caddy automatically provisions and renews a Let's Encrypt certificate for `ORIGIN_DOMAIN`. No manual cert management needed.
+
+**Without a domain** — just set `HOST_BASE_URL` to your server IP and leave `ORIGIN_DOMAIN` empty. The bot will be exposed directly on port 8080 over HTTP.
+
 ## 📦 Installation
 
 ### Linux (Ubuntu/Debian)
@@ -376,6 +404,8 @@ Telegram_7z_Bot/
 ├── data/                  # Persistent data
 │   ├── passwords.json     # User passwords
 │   └── hosted_files/      # Temporary file storage
+├── docker-compose.yml     # Docker Compose (bot + Caddy HTTPS)
+├── Caddyfile              # Caddy reverse proxy config
 ├── env.example            # Configuration template
 ├── requirements.txt       # Python dependencies
 ├── run.sh                 # Quick start script
