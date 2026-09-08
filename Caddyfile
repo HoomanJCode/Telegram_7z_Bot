@@ -1,0 +1,3 @@
+{$ORIGIN_DOMAIN} {
+    reverse_proxy bot:{$HOST_PORT}
+}

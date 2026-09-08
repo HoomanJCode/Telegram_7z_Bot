@@ -1,0 +1,31 @@
+services:
+  bot:
+    image: ghcr.io/hoomanjcode/telegram-7z-bot:latest
+    container_name: telegram-7z-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./.env:/app/.env
+      - ./data:/app/data
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: telegram-7z-bot-caddy
+    restart: unless-stopped
+    environment:
+      - ORIGIN_DOMAIN=${ORIGIN_DOMAIN}
+      - HOST_PORT=${HOST_PORT:-8080}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - bot
+
+volumes:
+  caddy_data:
+  caddy_config:
