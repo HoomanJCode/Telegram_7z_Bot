@@ -13,6 +13,7 @@ A powerful, modular Telegram bot that downloads files from URLs, creates passwor
 - **📦 Automatic Archiving**: All files automatically packed into 7z format
 - **🔒 Password Protection**: Optional AES-256 encryption for archives
 - **🔗 Direct Links**: Built-in HTTP server for file hosting with configurable expiry
+- **🔒 Automatic HTTPS**: Caddy reverse proxy with auto Let's Encrypt certificates
 - **📤 File Conversion**: Upload files to get 7z archives or direct links
 - **📚 Batch Processing**: Multiple URLs merged into single archive
 - **🔄 Split Archives**: Large files automatically split for Telegram limits
@@ -183,8 +184,19 @@ BOT_TOKEN=your_bot_token_here
 API_BASE_URL=
 
 # Direct Link Host Configuration (Optional)
+# Use https:// if you have HTTPS via Caddy
 HOST_BASE_URL=http://your-server-ip:8080
 HOST_PORT=8080
+
+# Domain for automatic HTTPS via Caddy (Docker only)
+# Set to your domain, e.g. files.yourdomain.com
+# Leave empty to skip HTTPS and expose on port 8080 directly.
+ORIGIN_DOMAIN=
+
+# Caddy External Ports (Docker only)
+# Change these if another server already uses 80/443.
+CADDY_PORT_HTTP=80
+CADDY_PORT_HTTPS=443
 
 # File Storage Time in Hours
 STORE_TIME_HOURS=48
@@ -213,6 +225,9 @@ ADMIN_IDS=
 | `API_BASE_FILE_URL` | Custom file API URL | Telegram default |
 | `HOST_BASE_URL` | Your server URL for direct links | Empty (disabled) |
 | `HOST_PORT` | Web server port | 8080 |
+| `ORIGIN_DOMAIN` | Domain for Caddy HTTPS (Docker only) | Empty (HTTP only) |
+| `CADDY_PORT_HTTP` | Caddy HTTP port | 80 |
+| `CADDY_PORT_HTTPS` | Caddy HTTPS port | 443 |
 | `STORE_TIME_HOURS` | File retention period in hours | 48 (2 days) |
 | `MAX_TELEGRAM_SIZE_MB` | Max file size for Telegram upload | 50 |
 | `DOWNLOAD_METHOD` | Download method (aria2/direct) | aria2 |
@@ -228,7 +243,27 @@ ADMIN_IDS=
 
 ### Setting Up Direct Links
 
-For direct link feature, you need a VPS with public IP:
+For direct link feature, you need a VPS with public IP.
+
+**With HTTPS (recommended):**
+
+```bash
+# 1. Point a subdomain to your VPS (e.g. files.yourdomain.com → YOUR_VPS_IP)
+# 2. Set .env values
+ORIGIN_DOMAIN=files.yourdomain.com
+HOST_BASE_URL=https://files.yourdomain.com
+
+# 3. Open ports in firewall
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+
+# 4. Run with Docker
+sudo docker compose up -d
+
+# Links will be: https://files.yourdomain.com/files/filename.7z
+```
+
+**Without HTTPS:**
 
 ```bash
 # 1. Set your VPS IP in .env
@@ -276,6 +311,7 @@ Set these in **Settings → Secrets and variables → Actions**:
 | `VPS_SSH_PRIVATE_KEY` | SSH private key for the VPS |
 | `BOT_TOKEN` | Telegram bot token |
 | `HOST_BASE_URL` | Your VPS URL for direct links |
+| `ORIGIN_DOMAIN` | Domain for automatic HTTPS via Caddy |
 | `API_BASE_URL` | Optional custom Telegram API URL |
 | `API_BASE_FILE_URL` | Optional custom file API URL |
 | `ARIA2_SECRET` | Optional aria2 RPC secret |
@@ -289,6 +325,8 @@ Tunables can also be set as Actions **variables** (otherwise they fall back to t
 | Variable | Default |
 |----------|---------|
 | `HOST_PORT` | `8080` |
+| `CADDY_PORT_HTTP` | `80` |
+| `CADDY_PORT_HTTPS` | `443` |
 | `STORE_TIME_HOURS` | `48` |
 | `MAX_TELEGRAM_SIZE_MB` | `50` |
 | `DOWNLOAD_METHOD` | `aria2` |
@@ -540,6 +578,32 @@ HOST_PORT=8888
 - Ensure enough disk space
 - Check network connectivity
 
+**Caddy HTTPS not working:**
+```bash
+# Check Caddy logs
+docker compose logs caddy
+
+# Common causes:
+# - Domain DNS not pointing to your server
+# - Ports 80/443 blocked by firewall
+# - Another service already using ports 80/443
+
+# Solution: change Caddy ports in .env
+CADDY_PORT_HTTP=8080
+CADDY_PORT_HTTPS=8443
+```
+
+**Port conflict with another web server:**
+```bash
+# Option 1: Change Caddy ports
+CADDY_PORT_HTTP=8080
+CADDY_PORT_HTTPS=8443
+
+# Option 2: Use Cloudflare proxy (no Caddy needed)
+# Just set HOST_BASE_URL=https://files.yourdomain.com
+# and leave ORIGIN_DOMAIN empty
+```
+
 ## 📊 Performance Tips
 
 1. **Use aria2**: Faster downloads with multi-connection support
@@ -560,14 +624,16 @@ HOST_PORT=8888
 ### Production Recommendations
 
 ```bash
-# Use systemd service for auto-restart
+# Docker (recommended): automatic restart + HTTPS via Caddy
+sudo docker compose up -d
+
+# Or systemd for bare-metal installs
 sudo systemctl enable filebot
 sudo systemctl start filebot
 
-# Set up reverse proxy with Nginx for HTTPS
 # Regular security updates: sudo apt update && sudo apt upgrade
 # Monitor disk usage: df -h
-# View logs: journalctl -u filebot -f
+# View logs: docker compose logs -f  (Docker) or journalctl -u filebot -f (systemd)
 ```
 
 ## 📝 License
