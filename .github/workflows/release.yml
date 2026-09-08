@@ -236,13 +236,15 @@ jobs:
 
           # Use docker-compose.yml from the repo
           cp docker-compose.yml /tmp/docker-compose.yml
-          if [ -n "$ORIGIN_DOMAIN" ]; then
-            cp Caddyfile /tmp/Caddyfile
+
+          # When HTTPS is disabled (no ORIGIN_DOMAIN), publish the bot port directly
+          if [ -z "$ORIGIN_DOMAIN" ]; then
+            printf 'services:\n  bot:\n    ports:\n      - "%s:%s"\n' "$HOST_PORT" "$HOST_PORT" > /tmp/ports-override.yml
           fi
 
-          # Replace placeholder with actual image on VPS
-          FULL_IMAGE="ghcr.io/${IMAGE_NAME}:${IMAGE_TAG}"
-          echo "Full image: ${FULL_IMAGE}"
+          # Pin the deployed image tag via BOT_IMAGE (compose default is :latest)
+          printf 'BOT_IMAGE=%s\n' "ghcr.io/${IMAGE_NAME}:${IMAGE_TAG}" >> /tmp/.env
+          echo "Image: ghcr.io/${IMAGE_NAME}:${IMAGE_TAG}"
 
           # Install Docker if not present
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "command -v docker || (curl -fsSL https://get.docker.com | sh)"
@@ -253,51 +255,32 @@ jobs:
           # Copy files to VPS
           scp -P 22 /tmp/.env ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/.env
           scp -P 22 /tmp/docker-compose.yml ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/docker-compose.yml
+          if [ -f /tmp/ports-override.yml ]; then
+            scp -P 22 /tmp/ports-override.yml ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/ports-override.yml
+          fi
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
-
-          # Replace placeholder with actual image on VPS
-          ssh -p 22 ${VPS_USER}@${VPS_HOST} "sed -i 's|IMAGE_PLACEHOLDER|${FULL_IMAGE}|g' ${DEPLOY_DIR}/docker-compose.yml"
 
           # Ensure shared Caddy network exists
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "docker network create caddy 2>/dev/null || true"
 
           # Start shared Caddy if not running (first deploy)
-          ssh -p 22 ${VPS_USER}@${VPS_HOST} "if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
-            if [ ! -f /opt/caddy/Caddyfile ]; then
-              cat > /opt/caddy/Caddyfile << 'CADDYEOF'
-# Shared Caddyfile — managed by deployments
-# Add new app domains below.
-CADDYEOF
-            fi
-            docker run -d --name caddy --restart unless-stopped \\
-              -p 80:80 -p 443:443 \\
-              -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \\
-              -v caddy_data:/data \\
-              -v caddy_config:/config \\
-              --network caddy \\
-              caddy:2-alpine
-          fi"
+          ssh -p 22 ${VPS_USER}@${VPS_HOST} "if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then if [ ! -f /opt/caddy/Caddyfile ]; then printf '# Shared Caddyfile - managed by deployments\n' > /opt/caddy/Caddyfile; fi; docker run -d --name caddy --restart unless-stopped -p 80:80 -p 443:443 -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v caddy_data:/data -v caddy_config:/config --network caddy caddy:2-alpine; fi"
 
           # Append this app's domain to the shared Caddyfile (skip if already present)
           if [ -n "$ORIGIN_DOMAIN" ]; then
-            ssh -p 22 ${VPS_USER}@${VPS_HOST} "if ! grep -q '${ORIGIN_DOMAIN}' /opt/caddy/Caddyfile; then
-              cat >> /opt/caddy/Caddyfile << 'CADDYEOF'
-${ORIGIN_DOMAIN} {
-    reverse_proxy bot:${HOST_PORT}
-}
-CADDYEOF
-              docker exec caddy caddy reload --config /etc/caddy/Caddyfile
-              echo '✅ Caddy reloaded with new domain'
-            else
-              echo '⚠️ Domain ${ORIGIN_DOMAIN} already in Caddyfile'
-            fi"
+            ssh -p 22 ${VPS_USER}@${VPS_HOST} "if grep -q '${ORIGIN_DOMAIN}' /opt/caddy/Caddyfile; then echo '⚠️ Domain ${ORIGIN_DOMAIN} already in Caddyfile'; else printf '%s {\n    reverse_proxy ${CONTAINER}:${HOST_PORT}\n}\n' '${ORIGIN_DOMAIN}' >> /opt/caddy/Caddyfile && docker exec caddy caddy reload --config /etc/caddy/Caddyfile && echo '✅ Caddy reloaded with new domain'; fi"
+          fi
+
+          # Remove stale port override when switching to HTTPS
+          if [ -n "$ORIGIN_DOMAIN" ]; then
+            ssh -p 22 ${VPS_USER}@${VPS_HOST} "rm -f ${DEPLOY_DIR}/ports-override.yml"
           fi
 
           # Validate token
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "grep -q '^BOT_TOKEN=$' ${DEPLOY_DIR}/.env && echo '❌ BOT_TOKEN is empty!' && exit 1 || echo '✅ BOT_TOKEN is set'"
 
           # Pull and restart
-          ssh -p 22 ${VPS_USER}@${VPS_HOST} "cd ${DEPLOY_DIR} && docker compose pull && docker compose up -d --remove-orphans"
+          ssh -p 22 ${VPS_USER}@${VPS_HOST} "cd ${DEPLOY_DIR} && docker compose pull && if [ -f ports-override.yml ]; then docker compose -f docker-compose.yml -f ports-override.yml up -d --remove-orphans; else docker compose up -d --remove-orphans; fi"
 
           # Clean old images
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "docker image prune -f"

@@ -1,6 +1,6 @@
 services:
   bot:
-    image: ghcr.io/hoomanjcode/telegram-7z-bot:latest
+    image: ${BOT_IMAGE:-ghcr.io/hoomanjcode/telegram-7z-bot:latest}
     container_name: telegram-7z-bot
     restart: unless-stopped
     env_file:
