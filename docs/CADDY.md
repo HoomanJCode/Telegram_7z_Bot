@@ -2,6 +2,38 @@
 
 This project uses a **shared Caddy reverse proxy** that handles HTTPS for multiple apps on the same VPS. Any GitHub repo can deploy to the same machine and get automatic HTTPS — no manual cert management needed.
 
+## Quick Start (Copy-Paste)
+
+**1. Add to your `docker-compose.yml`:**
+
+```yaml
+services:
+  your-app:
+    image: your-app:latest
+    container_name: your-app
+    restart: unless-stopped
+    networks:
+      - caddy
+
+networks:
+  caddy:
+    external: true
+```
+
+**2. Add these GitHub Secrets:**
+
+| Secret | Value |
+|--------|-------|
+| `VPS_HOST` | Your VPS IP |
+| `VPS_SSH_PRIVATE_KEY` | SSH private key |
+| `ORIGIN_DOMAIN` | `your-app.yourdomain.com` |
+
+**3. Copy the deploy step from `docs/CADDY.md` (Step 3) into your workflow.**
+
+That's it. Caddy handles HTTPS automatically.
+
+---
+
 ## How It Works
 
 ```

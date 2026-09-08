@@ -1,0 +1,19 @@
+# ============================================
+# COPY THIS into your docker-compose.yml
+# Replace "your-app" with your container name
+# Replace "3000" with your app's port
+# ============================================
+
+services:
+  your-app:
+    image: your-app:latest
+    container_name: your-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - caddy
+
+networks:
+  caddy:
+    external: true
