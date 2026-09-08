@@ -1,15 +1,14 @@
 # ============================================
-# Caddy Reverse Proxy — Automatic HTTPS
+# Shared Caddyfile — managed by deployments
 # ============================================
+# This file is maintained by the deploy workflow.
+# New app domains are appended below.
 # Caddy auto-provisions Let's Encrypt certificates.
-# Add more sites below by duplicating a block with a different domain.
+# ============================================
 
-# Bot file hosting
+# Telegram 7z Bot
 {$ORIGIN_DOMAIN} {
     reverse_proxy bot:{$HOST_PORT}
 }
 
-# Example: add another subdomain for a different app
-# myapp.yourdomain.com {
-#     reverse_proxy other-container:3000
-# }
+# --- Add new app domains below this line ---

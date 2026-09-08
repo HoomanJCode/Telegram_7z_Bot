@@ -1,0 +1,38 @@
+# ============================================
+# Shared Caddy — run once for all apps
+# ============================================
+# Deploy this once on the VPS. All apps connect to the "caddy" network.
+#
+# Usage:
+#   docker compose -f caddy-compose.yml up -d
+#
+# To add a new app, append a domain block to /opt/caddy/Caddyfile:
+#   newapp.yourdomain.com {
+#       reverse_proxy newapp-container:3000
+#   }
+# Then reload:
+#   docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "${CADDY_PORT_HTTP:-80}:80"
+      - "${CADDY_PORT_HTTPS:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - caddy
+
+networks:
+  caddy:
+    name: caddy
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
