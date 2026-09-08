@@ -1,3 +1,15 @@
+# ============================================
+# Caddy Reverse Proxy — Automatic HTTPS
+# ============================================
+# Caddy auto-provisions Let's Encrypt certificates.
+# Add more sites below by duplicating a block with a different domain.
+
+# Bot file hosting
 {$ORIGIN_DOMAIN} {
     reverse_proxy bot:{$HOST_PORT}
 }
+
+# Example: add another subdomain for a different app
+# myapp.yourdomain.com {
+#     reverse_proxy other-container:3000
+# }
