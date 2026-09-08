@@ -97,16 +97,30 @@ jobs:
           echo "IMAGE_NAME=${IMAGE_NAME}"
           echo "IMAGE_TAG=${IMAGE_TAG}"
 
-          # Fall back to deriving the origin domain from HOST_BASE_URL when
-          # ORIGIN_DOMAIN is unset. Handles: http://, https://, or bare host:port.
+          # Derive ORIGIN_DOMAIN from HOST_BASE_URL when not set.
+          # Skip if HOST_BASE_URL starts with http:// (user wants plain HTTP).
           if [ -z "$ORIGIN_DOMAIN" ]; then
-            # Strip protocol, path, port — leave just the hostname
-            DERIVED=$(printf '%s' "$HOST_BASE_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#[:/].*##')
-            if [ -n "$DERIVED" ] && [ "$DERIVED" != "localhost" ] && ! printf '%s' "$DERIVED" | grep -qE '^([0-9]{1,3}\\.){3}[0-9]{1,3}$'; then
-              ORIGIN_DOMAIN="$DERIVED"
-              echo "⚠️  ORIGIN_DOMAIN unset — derived '${ORIGIN_DOMAIN}' from HOST_BASE_URL"
-              echo "⚠️  Set ORIGIN_DOMAIN explicitly before repointing HOST_BASE_URL at your CDN"
-            fi
+            case "$HOST_BASE_URL" in
+              http://*)
+                echo "ℹ️  HOST_BASE_URL uses http:// — skipping HTTPS/Caddy"
+                ;;
+              https://*)
+                # Strip https://, path, port — leave just the hostname
+                DERIVED=$(printf '%s' "$HOST_BASE_URL" | sed -E 's#https://##; s#[:/].*##')
+                if [ -n "$DERIVED" ] && [ "$DERIVED" != "localhost" ] && ! printf '%s' "$DERIVED" | grep -qE '^([0-9]{1,3}\\.){3}[0-9]{1,3}$'; then
+                  ORIGIN_DOMAIN="$DERIVED"
+                  echo "⚠️  ORIGIN_DOMAIN unset — derived '${ORIGIN_DOMAIN}' from HOST_BASE_URL"
+                fi
+                ;;
+              *)
+                # Bare host:port (no protocol) — derive domain
+                DERIVED=$(printf '%s' "$HOST_BASE_URL" | sed -E 's#[:/].*##')
+                if [ -n "$DERIVED" ] && [ "$DERIVED" != "localhost" ] && ! printf '%s' "$DERIVED" | grep -qE '^([0-9]{1,3}\\.){3}[0-9]{1,3}$'; then
+                  ORIGIN_DOMAIN="$DERIVED"
+                  echo "⚠️  ORIGIN_DOMAIN unset — derived '${ORIGIN_DOMAIN}' from HOST_BASE_URL"
+                fi
+                ;;
+            esac
           fi
 
           # Create .env locally (secrets available here)
