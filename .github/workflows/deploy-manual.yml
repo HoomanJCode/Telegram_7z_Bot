@@ -127,7 +127,7 @@ jobs:
           printf 'WHITELIST=%s\n' "$WHITELIST" >> /tmp/.env
           printf 'ADMIN_IDS=%s\n' "$ADMIN_IDS" >> /tmp/.env
 
-          # Use docker-compose.yml and Caddyfile from the repo
+          # Use docker-compose.yml from the repo
           cp docker-compose.yml /tmp/docker-compose.yml
           if [ -n "$ORIGIN_DOMAIN" ]; then
             cp Caddyfile /tmp/Caddyfile
@@ -141,18 +141,50 @@ jobs:
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "command -v docker || (curl -fsSL https://get.docker.com | sh)"
 
           # Create deploy directory
-          ssh -p 22 ${VPS_USER}@${VPS_HOST} "mkdir -p ${DEPLOY_DIR}/data"
+          ssh -p 22 ${VPS_USER}@${VPS_HOST} "mkdir -p ${DEPLOY_DIR}/data /opt/caddy"
 
           # Copy files to VPS
           scp -P 22 /tmp/.env ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/.env
           scp -P 22 /tmp/docker-compose.yml ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/docker-compose.yml
-          if [ -n "$ORIGIN_DOMAIN" ]; then
-            scp -P 22 /tmp/Caddyfile ${VPS_USER}@${VPS_HOST}:${DEPLOY_DIR}/Caddyfile
-          fi
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
 
           # Replace placeholder with actual image on VPS
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "sed -i 's|IMAGE_PLACEHOLDER|${FULL_IMAGE}|g' ${DEPLOY_DIR}/docker-compose.yml"
+
+          # Ensure shared Caddy network exists
+          ssh -p 22 ${VPS_USER}@${VPS_HOST} "docker network create caddy 2>/dev/null || true"
+
+          # Start shared Caddy if not running (first deploy)
+          ssh -p 22 ${VPS_USER}@${VPS_HOST} "if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
+            if [ ! -f /opt/caddy/Caddyfile ]; then
+              cat > /opt/caddy/Caddyfile << 'CADDYEOF'
+# Shared Caddyfile — managed by deployments
+# Add new app domains below.
+CADDYEOF
+            fi
+            docker run -d --name caddy --restart unless-stopped \\
+              -p 80:80 -p 443:443 \\
+              -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \\
+              -v caddy_data:/data \\
+              -v caddy_config:/config \\
+              --network caddy \\
+              caddy:2-alpine
+          fi"
+
+          # Append this app's domain to the shared Caddyfile (skip if already present)
+          if [ -n "$ORIGIN_DOMAIN" ]; then
+            ssh -p 22 ${VPS_USER}@${VPS_HOST} "if ! grep -q '${ORIGIN_DOMAIN}' /opt/caddy/Caddyfile; then
+              cat >> /opt/caddy/Caddyfile << 'CADDYEOF'
+${ORIGIN_DOMAIN} {
+    reverse_proxy bot:${HOST_PORT}
+}
+CADDYEOF
+              docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+              echo '✅ Caddy reloaded with new domain'
+            else
+              echo '⚠️ Domain ${ORIGIN_DOMAIN} already in Caddyfile'
+            fi"
+          fi
 
           # Validate token
           ssh -p 22 ${VPS_USER}@${VPS_HOST} "grep -q '^BOT_TOKEN=$' ${DEPLOY_DIR}/.env && echo '❌ BOT_TOKEN is empty!' && exit 1 || echo '✅ BOT_TOKEN is set'"
