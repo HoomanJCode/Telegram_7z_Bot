@@ -1,0 +1,33 @@
+name: Tests
+
+# Reusable test workflow. Called by ci.yml (push/PR) and release.yml
+# (tag deploys) so the test logic lives in exactly one place.
+on:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: 🧪 Test
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: 📦 Install dependencies
+        run: pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: 🧪 Run tests
+        run: |
+          if [ -d tests ]; then
+            python -m unittest discover tests -v
+          else
+            echo "No tests directory found — running import check instead"
+            python -c "from config.settings import Settings; from core.file_manager import FileManager; from core.archiver import SevenZipArchiver; from core.downloader import DownloadManager; from services.web_server import WebServer; print('✅ Imports OK')"
+          fi
