@@ -1,9 +1,20 @@
 name: Tests
 
-# Reusable test workflow. Called by ci.yml (push/PR) and release.yml
-# (tag deploys) so the test logic lives in exactly one place.
+# The single source of truth for testing.
+# - Runs automatically on every push/PR to master
+# - Callable from other workflows (release.yml)
+# - Runnable manually from the Actions tab
 on:
   workflow_call:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "**.md"
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
 
 jobs:
   test:

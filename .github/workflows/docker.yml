@@ -1,10 +1,17 @@
 name: Docker
 
-# Reusable build-and-push workflow. Called by release.yml after tests
-# pass. Builds the bot image and publishes it to GHCR with the tag
-# name plus "latest".
+# Build and push the bot image to GHCR.
+# - Callable from release.yml (tags with ref_name + latest)
+# - Runnable manually from the Actions tab (defaults to latest tag /
+#   current ref; use the tag input to publish an arbitrary tag)
 on:
   workflow_call:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (tag, branch or SHA). Defaults to the current branch.'
+        required: false
+        default: ''
 
 env:
   REGISTRY: ghcr.io
@@ -20,6 +27,8 @@ jobs:
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: 🔑 Login to GHCR
         uses: docker/login-action@v3
@@ -38,7 +47,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
           tags: |
-            type=raw,value=${{ github.ref_name }}
+            type=raw,value=${{ inputs.ref || github.ref_name }}
             type=raw,value=latest
 
       - name: 🏗️ Build and push
