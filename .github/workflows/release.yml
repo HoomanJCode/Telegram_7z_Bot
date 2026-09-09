@@ -78,10 +78,13 @@ jobs:
 
   # ──────────────────────────────────────────────
   # 4. Deploy to VPS (reusable workflow; skipped without VPS secrets)
+  #    Runs in parallel with the release job — deploy only needs the
+  #    pushed image, not the GitHub Release. A changelog failure won't
+  #    block deployment.
   # ──────────────────────────────────────────────
   deploy:
     name: 🚀 Deploy to VPS
-    needs: release
+    needs: docker
     uses: ./.github/workflows/deploy.yml
     with:
       tag: ${{ github.ref_name }}
